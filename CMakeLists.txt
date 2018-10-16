@@ -8,19 +8,25 @@ set_default_configuration_release()
 msvc_use_static_runtime()
 
 # Options
-option(USE_CUDA  "Build with GPU acceleration") 
-option(USE_AVX  "Build with AVX instructions. May not produce identical results due to approximate math." OFF) 
-option(USE_NCCL "Build using NCCL for multi-GPU. Also requires USE_CUDA") 
+option(USE_CUDA  "Build with GPU acceleration")
 option(JVM_BINDINGS "Build JVM bindings" OFF)
 option(GOOGLE_TEST "Build google tests" OFF)
 option(R_LIB "Build shared library for R package" OFF)
-set(GPU_COMPUTE_VER 35;50;52;60;61 CACHE STRING
-  "Space separated list of compute versions to be built against")
+set(GPU_COMPUTE_VER "" CACHE STRING
+  "Space separated list of compute versions to be built against, e.g. '35 61'")
+option(USE_SANITIZER "Use santizer flags" OFF)
+option(SANITIZER_PATH "Path to sanitizes.")
+set(ENABLED_SANITIZERS "address" "leak" CACHE STRING
+  "Semicolon separated list of sanitizer names. E.g 'address;leak'. Supported sanitizers are
+address, leak and thread.")
+
+# Plugins
+option(PLUGIN_LZ4 "Build lz4 plugin" OFF)
+option(PLUGIN_DENSE_PARSER "Build dense parser plugin" OFF)
 
 # Deprecation warning
-if(PLUGIN_UPDATER_GPU)
-  set(USE_CUDA ON)
-  message(WARNING "The option 'PLUGIN_UPDATER_GPU' is deprecated. Set 'USE_CUDA' instead.")
+if(USE_AVX)
+  message(WARNING "The option 'USE_AVX' is deprecated as experimental AVX features have been removed from xgboost.")
 endif()
 
 # Compiler flags
@@ -39,17 +45,22 @@ else()
   # Performance
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -funroll-loops")
 endif()
-
-# AVX
-if(USE_AVX)
-  if(MSVC)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /arch:AVX")
-  else()
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx")
-  endif()
-  add_definitions(-DXGBOOST_USE_AVX)
+if(WIN32 AND MINGW)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -static-libstdc++")
 endif()
 
+# Sanitizer
+if(USE_SANITIZER)
+  include(cmake/Sanitizer.cmake)
+  enable_sanitizers("${ENABLED_SANITIZERS}")
+endif(USE_SANITIZER)
+
+# dmlc-core
+add_subdirectory(dmlc-core)
+set(LINK_LIBRARIES dmlc rabit)
+
+# enable custom logging
+add_definitions(-DDMLC_LOG_CUSTOMIZE=1)
 
 # compiled code customizations for R package
 if(R_LIB)
@@ -64,13 +75,14 @@ if(R_LIB)
   )
 endif()
 
+# Gather source files
 include_directories (
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/dmlc-core/include
     ${PROJECT_SOURCE_DIR}/rabit/include
 )
 
-file(GLOB_RECURSE SOURCES 
+file(GLOB_RECURSE SOURCES
     src/*.cc
     src/*.h
     include/*.h
@@ -79,10 +91,21 @@ file(GLOB_RECURSE SOURCES
 # Only add main function for executable target
 list(REMOVE_ITEM SOURCES ${PROJECT_SOURCE_DIR}/src/cli_main.cc)
 
+file(GLOB_RECURSE TEST_SOURCES "tests/cpp/*.cc")
+
 file(GLOB_RECURSE CUDA_SOURCES
     src/*.cu
     src/*.cuh
 )
+
+# Add plugins to source files
+if(PLUGIN_LZ4)
+  list(APPEND SOURCES plugin/lz4/sparse_page_lz4_format.cc)
+  link_libraries(lz4)
+endif()
+if(PLUGIN_DENSE_PARSER)
+  list(APPEND SOURCES plugin/dense_parser/dense_libsvm.cc)
+endif()
 
 # rabit
 # TODO: Create rabit cmakelists.txt
@@ -103,47 +126,36 @@ else()
   add_library(rabit STATIC ${RABIT_SOURCES})
 endif()
 
-
-# dmlc-core
-add_subdirectory(dmlc-core)
-set(LINK_LIBRARIES dmlccore rabit)
-
-
 if(USE_CUDA)
   find_package(CUDA 8.0 REQUIRED)
   cmake_minimum_required(VERSION 3.5)
 
   add_definitions(-DXGBOOST_USE_CUDA)
-  
+
   include_directories(cub)
 
   if(USE_NCCL)
-    include_directories(nccl/src)
+    find_package(Nccl REQUIRED)
+    include_directories(${NCCL_INCLUDE_DIR})
     add_definitions(-DXGBOOST_USE_NCCL)
   endif()
 
-  if((CUDA_VERSION_MAJOR EQUAL 9) OR (CUDA_VERSION_MAJOR GREATER 9))
-    message("CUDA 9.0 detected, adding Volta compute capability (7.0).")
-    set(GPU_COMPUTE_VER "${GPU_COMPUTE_VER};70")
-  endif()
-  
   set(GENCODE_FLAGS "")
   format_gencode_flags("${GPU_COMPUTE_VER}" GENCODE_FLAGS)
+  message("cuda architecture flags: ${GENCODE_FLAGS}")
+
   set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS};--expt-extended-lambda;--expt-relaxed-constexpr;${GENCODE_FLAGS};-lineinfo;")
   if(NOT MSVC)
-    set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS};-Xcompiler -fPIC; -std=c++11")
-  endif()
-
-  if(USE_NCCL)
-    add_subdirectory(nccl)
+    set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS};-Xcompiler -fPIC; -Xcompiler -Werror; -std=c++11")
   endif()
 
   cuda_add_library(gpuxgboost ${CUDA_SOURCES} STATIC)
-  
+
   if(USE_NCCL)
-    target_link_libraries(gpuxgboost nccl)
+    link_directories(${NCCL_LIBRARY})
+    target_link_libraries(gpuxgboost ${NCCL_LIB_NAME})
   endif()
-  list(APPEND LINK_LIBRARIES gpuxgboost) 
+  list(APPEND LINK_LIBRARIES gpuxgboost)
 endif()
 
 
@@ -177,6 +189,9 @@ if(R_LIB)
   target_link_libraries(xgboost ${LINK_LIBRARIES})
   # R uses no lib prefix in shared library names of its packages
   set_target_properties(xgboost PROPERTIES PREFIX "")
+  if(APPLE)
+    set_target_properties(xgboost PROPERTIES SUFFIX ".so")
+  endif()
 
   setup_rpackage_install_target(xgboost ${CMAKE_CURRENT_BINARY_DIR})
   # use a dummy location for any other remaining installs
@@ -224,12 +239,11 @@ endif()
 
 # Test
 if(GOOGLE_TEST)
-  find_package(GTest REQUIRED)
   enable_testing()
+  find_package(GTest REQUIRED)
 
-  file(GLOB_RECURSE TEST_SOURCES "tests/cpp/*.cc")
   auto_source_group("${TEST_SOURCES}")
-  include_directories(${GTEST_INCLUDE_DIR})
+  include_directories(${GTEST_INCLUDE_DIRS})
 
   if(USE_CUDA)
     file(GLOB_RECURSE CUDA_TEST_SOURCES "tests/cpp/*.cu")

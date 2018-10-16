@@ -21,6 +21,11 @@
 #include "./common/random.h"
 #include "common/timer.h"
 
+namespace {
+
+const char* kMaxDeltaStepDefaultValue = "0.7";
+
+}  // anonymous namespace
 
 namespace xgboost {
 // implementation of base learner.
@@ -80,15 +85,13 @@ struct LearnerTrainParam : public dmlc::Parameter<LearnerTrainParam> {
   int tree_method;
   // internal test flag
   std::string test_flag;
-  // maximum buffered row value
-  float prob_buffer_row;
-  // maximum row per batch.
-  size_t max_row_perbatch;
   // number of threads to use if OpenMP is enabled
   // if equals 0, use system default
   int nthread;
   // flag to print out detailed breakdown of runtime
   int debug_verbose;
+  // flag to disable default metric
+  int disable_default_eval_metric;
   // declare parameters
   DMLC_DECLARE_PARAMETER(LearnerTrainParam) {
     DMLC_DECLARE_FIELD(seed).set_default(0).describe(
@@ -116,19 +119,15 @@ struct LearnerTrainParam : public dmlc::Parameter<LearnerTrainParam> {
         .describe("Choice of tree construction method.");
     DMLC_DECLARE_FIELD(test_flag).set_default("").describe(
         "Internal test flag");
-    DMLC_DECLARE_FIELD(prob_buffer_row)
-        .set_default(1.0f)
-        .set_range(0.0f, 1.0f)
-        .describe("Maximum buffered row portion");
-    DMLC_DECLARE_FIELD(max_row_perbatch)
-        .set_default(std::numeric_limits<size_t>::max())
-        .describe("maximum row per batch.");
     DMLC_DECLARE_FIELD(nthread).set_default(0).describe(
         "Number of threads to use.");
     DMLC_DECLARE_FIELD(debug_verbose)
         .set_lower_bound(0)
         .set_default(0)
         .describe("flag to print out detailed breakdown of runtime");
+    DMLC_DECLARE_FIELD(disable_default_eval_metric)
+        .set_default(0)
+        .describe("flag to disable default metric. Set to >0 to disable");
   }
 };
 
@@ -162,9 +161,6 @@ class LearnerImpl : public Learner {
           cfg_["updater"] = "distcol";
         } else if (tparam_.dsplit == 2) {
           cfg_["updater"] = "grow_histmaker,prune";
-        }
-        if (tparam_.prob_buffer_row != 1.0f) {
-          cfg_["updater"] = "grow_histmaker,refresh,prune";
         }
       }
     } else if (tparam_.tree_method == 3) {
@@ -231,7 +227,7 @@ class LearnerImpl : public Learner {
 
     if (cfg_.count("max_delta_step") == 0 && cfg_.count("objective") != 0 &&
         cfg_["objective"] == "count:poisson") {
-      cfg_["max_delta_step"] = "0.7";
+      cfg_["max_delta_step"] = kMaxDeltaStepDefaultValue;
     }
 
     ConfigureUpdaters();
@@ -330,21 +326,41 @@ class LearnerImpl : public Learner {
 
   // rabit save model to rabit checkpoint
   void Save(dmlc::Stream* fo) const override {
-    fo->Write(&mparam_, sizeof(LearnerModelParam));
+    LearnerModelParam mparam = mparam_;  // make a copy to potentially modify
+    std::vector<std::pair<std::string, std::string> > extra_attr;
+      // extra attributed to be added just before saving
+
+    if (name_obj_ == "count:poisson") {
+      auto it = cfg_.find("max_delta_step");
+      if (it != cfg_.end()) {
+        // write `max_delta_step` parameter as extra attribute of booster
+        mparam.contain_extra_attrs = 1;
+        extra_attr.emplace_back("count_poisson_max_delta_step", it->second);
+      }
+    }
+    fo->Write(&mparam, sizeof(LearnerModelParam));
     fo->Write(name_obj_);
     fo->Write(name_gbm_);
     gbm_->Save(fo);
-    if (mparam_.contain_extra_attrs != 0) {
+    if (mparam.contain_extra_attrs != 0) {
       std::vector<std::pair<std::string, std::string> > attr(
           attributes_.begin(), attributes_.end());
+      attr.insert(attr.end(), extra_attr.begin(), extra_attr.end());
       fo->Write(attr);
     }
     if (name_obj_ == "count:poisson") {
-      auto it =
-          cfg_.find("max_delta_step");
-      if (it != cfg_.end()) fo->Write(it->second);
+      auto it = cfg_.find("max_delta_step");
+      if (it != cfg_.end()) {
+        fo->Write(it->second);
+      } else {
+        // recover value of max_delta_step from extra attributes
+        auto it2 = attributes_.find("count_poisson_max_delta_step");
+        const std::string max_delta_step
+          = (it2 != attributes_.end()) ? it2->second : kMaxDeltaStepDefaultValue;
+        fo->Write(max_delta_step);
+      }
     }
-    if (mparam_.contain_eval_metrics != 0) {
+    if (mparam.contain_eval_metrics != 0) {
       std::vector<std::string> metr;
       for (auto& ev : metrics_) {
         metr.emplace_back(ev->Name());
@@ -365,7 +381,7 @@ class LearnerImpl : public Learner {
     this->PredictRaw(train, &preds_);
     monitor_.Stop("PredictRaw");
     monitor_.Start("GetGradient");
-    obj_->GetGradient(&preds_, train->Info(), iter, &gpair_);
+    obj_->GetGradient(preds_, train->Info(), iter, &gpair_);
     monitor_.Stop("GetGradient");
     gbm_->DoBoost(train, &gpair_, obj_.get());
     monitor_.Stop("UpdateOneIter");
@@ -387,7 +403,7 @@ class LearnerImpl : public Learner {
     monitor_.Start("EvalOneIter");
     std::ostringstream os;
     os << '[' << iter << ']' << std::setiosflags(std::ios::fixed);
-    if (metrics_.size() == 0) {
+    if (metrics_.size() == 0 && tparam_.disable_default_eval_metric <= 0) {
       metrics_.emplace_back(Metric::Create(obj_->DefaultEvalMetric()));
     }
     for (size_t i = 0; i < data_sets.size(); ++i) {
@@ -395,7 +411,8 @@ class LearnerImpl : public Learner {
       obj_->EvalTransform(&preds_);
       for (auto& ev : metrics_) {
         os << '\t' << data_names[i] << '-' << ev->Name() << ':'
-           << ev->Eval(preds_.HostVector(), data_sets[i]->Info(), tparam_.dsplit == 2);
+           << ev->Eval(preds_.ConstHostVector(), data_sets[i]->Info(),
+                       tparam_.dsplit == 2);
       }
     }
 
@@ -438,7 +455,8 @@ class LearnerImpl : public Learner {
     this->PredictRaw(data, &preds_);
     obj_->EvalTransform(&preds_);
     return std::make_pair(metric,
-                          ev->Eval(preds_.HostVector(), data->Info(), tparam_.dsplit == 2));
+                          ev->Eval(preds_.ConstHostVector(), data->Info(),
+                                   tparam_.dsplit == 2));
   }
 
   void Predict(DMatrix* data, bool output_margin,
@@ -469,36 +487,6 @@ class LearnerImpl : public Learner {
       return;
     }
 
-    monitor_.Start("LazyInitDMatrix");
-    if (!p_train->HaveColAccess(true)) {
-      auto ncol = static_cast<int>(p_train->Info().num_col_);
-      std::vector<bool> enabled(ncol, true);
-      // set max row per batch to limited value
-      // in distributed mode, use safe choice otherwise
-      size_t max_row_perbatch = tparam_.max_row_perbatch;
-      const auto safe_max_row = static_cast<size_t>(32ul << 10ul);
-
-      if (tparam_.tree_method == 0 && p_train->Info().num_row_ >= (4UL << 20UL)) {
-        LOG(CONSOLE)
-            << "Tree method is automatically selected to be \'approx\'"
-            << " for faster speed."
-            << " to use old behavior(exact greedy algorithm on single machine),"
-            << " set tree_method to \'exact\'";
-        max_row_perbatch = std::min(max_row_perbatch, safe_max_row);
-      }
-
-      if (tparam_.tree_method == 1) {
-        LOG(CONSOLE) << "Tree method is selected to be \'approx\'";
-        max_row_perbatch = std::min(max_row_perbatch, safe_max_row);
-      }
-
-      if (tparam_.test_flag == "block" || tparam_.dsplit == 2) {
-        max_row_perbatch = std::min(max_row_perbatch, safe_max_row);
-      }
-      // initialize column access
-      p_train->InitColAccess(enabled, tparam_.prob_buffer_row, max_row_perbatch, true);
-    }
-
     if (!p_train->SingleColBlock() && cfg_.count("updater") == 0) {
       if (tparam_.tree_method == 2) {
         LOG(CONSOLE) << "tree method is set to be 'exact',"
@@ -510,7 +498,6 @@ class LearnerImpl : public Learner {
         gbm_->Configure(cfg_.begin(), cfg_.end());
       }
     }
-    monitor_.Stop("LazyInitDMatrix");
   }
 
   // return whether model is already initialized.

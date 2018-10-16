@@ -195,8 +195,8 @@ class GBTree : public GradientBooster {
           << "must have exactly ngroup*nrow gpairs";
       // TODO(canonizer): perform this on GPU if HostDeviceVector has device set.
       HostDeviceVector<GradientPair> tmp(in_gpair->Size() / ngroup,
-                                      GradientPair(), in_gpair->Devices());
-      std::vector<GradientPair>& gpair_h = in_gpair->HostVector();
+                                      GradientPair(), in_gpair->Distribution());
+      const auto& gpair_h = in_gpair->ConstHostVector();
       auto nsize = static_cast<bst_omp_uint>(tmp.Size());
       for (int gid = 0; gid < ngroup; ++gid) {
         std::vector<GradientPair>& tmp_h = tmp.HostVector();
@@ -221,7 +221,7 @@ class GBTree : public GradientBooster {
     predictor_->PredictBatch(p_fmat, out_preds, model_, 0, ntree_limit);
   }
 
-  void PredictInstance(const SparseBatch::Inst& inst,
+  void PredictInstance(const SparsePage::Inst& inst,
                std::vector<bst_float>* out_preds,
                unsigned ntree_limit,
                unsigned root_index) override {
@@ -361,7 +361,7 @@ class Dart : public GBTree {
     PredLoopInternal<Dart>(p_fmat, &out_preds->HostVector(), 0, ntree_limit, true);
   }
 
-  void PredictInstance(const SparseBatch::Inst& inst,
+  void PredictInstance(const SparsePage::Inst& inst,
                std::vector<bst_float>* out_preds,
                unsigned ntree_limit,
                unsigned root_index) override {
@@ -402,7 +402,8 @@ class Dart : public GBTree {
 
     if (init_out_preds) {
       size_t n = num_group * p_fmat->Info().num_row_;
-      const std::vector<bst_float>& base_margin = p_fmat->Info().base_margin_;
+      const auto& base_margin =
+        p_fmat->Info().base_margin_.ConstHostVector();
       out_preds->resize(n);
       if (base_margin.size() != 0) {
         CHECK_EQ(out_preds->size(), n);
@@ -437,21 +438,17 @@ class Dart : public GBTree {
         << "size_leaf_vector is enforced to 0 so far";
     CHECK_EQ(preds.size(), p_fmat->Info().num_row_ * num_group);
     // start collecting the prediction
-    dmlc::DataIter<RowBatch>* iter = p_fmat->RowIterator();
     auto* self = static_cast<Derived*>(this);
-    iter->BeforeFirst();
-    while (iter->Next()) {
-      const RowBatch &batch = iter->Value();
-      // parallel over local batch
+    for (const auto &batch : p_fmat->GetRowBatches()) {
       constexpr int kUnroll = 8;
-      const auto nsize = static_cast<bst_omp_uint>(batch.size);
+      const auto nsize = static_cast<bst_omp_uint>(batch.Size());
       const bst_omp_uint rest = nsize % kUnroll;
       #pragma omp parallel for schedule(static)
       for (bst_omp_uint i = 0; i < nsize - rest; i += kUnroll) {
         const int tid = omp_get_thread_num();
         RegTree::FVec& feats = thread_temp_[tid];
         int64_t ridx[kUnroll];
-        RowBatch::Inst inst[kUnroll];
+        SparsePage::Inst inst[kUnroll];
         for (int k = 0; k < kUnroll; ++k) {
           ridx[k] = static_cast<int64_t>(batch.base_rowid + i + k);
         }
@@ -470,7 +467,7 @@ class Dart : public GBTree {
       for (bst_omp_uint i = nsize - rest; i < nsize; ++i) {
         RegTree::FVec& feats = thread_temp_[0];
         const auto ridx = static_cast<int64_t>(batch.base_rowid + i);
-        const RowBatch::Inst inst = batch[i];
+        const SparsePage::Inst inst = batch[i];
         for (int gid = 0; gid < num_group; ++gid) {
           const size_t offset = ridx * num_group + gid;
           preds[offset] +=
@@ -497,7 +494,7 @@ class Dart : public GBTree {
   }
 
   // predict the leaf scores without dropped trees
-  inline bst_float PredValue(const RowBatch::Inst &inst,
+  inline bst_float PredValue(const SparsePage::Inst &inst,
                              int bst_group,
                              unsigned root_index,
                              RegTree::FVec *p_feats,

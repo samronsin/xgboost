@@ -83,13 +83,6 @@ class GBLinear : public GradientBooster {
                ObjFunction* obj) override {
     monitor_.Start("DoBoost");
 
-    if (!p_fmat->HaveColAccess(false)) {
-      monitor_.Start("InitColAccess");
-      std::vector<bool> enabled(p_fmat->Info().num_col_, true);
-      p_fmat->InitColAccess(enabled, 1.0f, param_.max_row_perbatch, false);
-      monitor_.Stop("InitColAccess");
-    }
-
     model_.LazyInitModel();
     this->LazySumWeights(p_fmat);
 
@@ -120,7 +113,7 @@ class GBLinear : public GradientBooster {
     monitor_.Stop("PredictBatch");
   }
   // add base margin
-  void PredictInstance(const SparseBatch::Inst &inst,
+  void PredictInstance(const SparsePage::Inst &inst,
                std::vector<bst_float> *out_preds,
                unsigned ntree_limit,
                unsigned root_index) override {
@@ -143,7 +136,7 @@ class GBLinear : public GradientBooster {
     model_.LazyInitModel();
     CHECK_EQ(ntree_limit, 0U)
         << "GBLinear::PredictContribution: ntrees is only valid for gbtree predictor";
-    const std::vector<bst_float>& base_margin = p_fmat->Info().base_margin_;
+    const auto& base_margin = p_fmat->Info().base_margin_.ConstHostVector();
     const int ngroup = model_.param.num_output_group;
     const size_t ncolumns = model_.param.num_feature + 1;
     // allocate space for (#features + bias) times #groups times #rows
@@ -152,23 +145,20 @@ class GBLinear : public GradientBooster {
     // make sure contributions is zeroed, we could be reusing a previously allocated one
     std::fill(contribs.begin(), contribs.end(), 0);
     // start collecting the contributions
-    dmlc::DataIter<RowBatch>* iter = p_fmat->RowIterator();
-    iter->BeforeFirst();
-    while (iter->Next()) {
-      const RowBatch& batch = iter->Value();
+    for (const auto &batch : p_fmat->GetRowBatches()) {
       // parallel over local batch
-      const auto nsize = static_cast<bst_omp_uint>(batch.size);
+      const auto nsize = static_cast<bst_omp_uint>(batch.Size());
       #pragma omp parallel for schedule(static)
       for (bst_omp_uint i = 0; i < nsize; ++i) {
-        const RowBatch::Inst &inst = batch[i];
+         auto inst = batch[i];
         auto row_idx = static_cast<size_t>(batch.base_rowid + i);
         // loop over output groups
         for (int gid = 0; gid < ngroup; ++gid) {
           bst_float *p_contribs = &contribs[(row_idx * ngroup + gid) * ncolumns];
           // calculate linear terms' contributions
-          for (bst_uint c = 0; c < inst.length; ++c) {
-            if (inst[c].index >= model_.param.num_feature) continue;
-            p_contribs[inst[c].index] = inst[c].fvalue * model_[inst[c].index][gid];
+          for (auto& ins : inst) {
+            if (ins.index >= model_.param.num_feature) continue;
+            p_contribs[ins.index] = ins.fvalue * model_[ins.index][gid];
           }
           // add base margin to BIAS
           p_contribs[ncolumns - 1] = model_.bias()[gid] +
@@ -201,17 +191,15 @@ class GBLinear : public GradientBooster {
     monitor_.Start("PredictBatchInternal");
       model_.LazyInitModel();
     std::vector<bst_float> &preds = *out_preds;
-    const std::vector<bst_float>& base_margin = p_fmat->Info().base_margin_;
+    const auto& base_margin = p_fmat->Info().base_margin_.ConstHostVector();
     // start collecting the prediction
-    dmlc::DataIter<RowBatch> *iter = p_fmat->RowIterator();
     const int ngroup = model_.param.num_output_group;
     preds.resize(p_fmat->Info().num_row_ * ngroup);
-    while (iter->Next()) {
-      const RowBatch &batch = iter->Value();
+    for (const auto &batch : p_fmat->GetRowBatches()) {
       // output convention: nrow * k, where nrow is number of rows
       // k is number of group
       // parallel over local batch
-      const auto nsize = static_cast<omp_ulong>(batch.size);
+      const auto nsize = static_cast<omp_ulong>(batch.Size());
       #pragma omp parallel for schedule(static)
       for (omp_ulong i = 0; i < nsize; ++i) {
         const size_t ridx = batch.base_rowid + i;
@@ -265,12 +253,12 @@ class GBLinear : public GradientBooster {
     }
   }
 
-  inline void Pred(const RowBatch::Inst &inst, bst_float *preds, int gid,
+  inline void Pred(const SparsePage::Inst &inst, bst_float *preds, int gid,
                    bst_float base) {
     bst_float psum = model_.bias()[gid] + base;
-    for (bst_uint i = 0; i < inst.length; ++i) {
-      if (inst[i].index >= model_.param.num_feature) continue;
-      psum += inst[i].fvalue * model_[inst[i].index][gid];
+    for (const auto& ins : inst) {
+      if (ins.index >= model_.param.num_feature) continue;
+      psum += ins.fvalue * model_[ins.index][gid];
     }
     preds[gid] = psum;
   }

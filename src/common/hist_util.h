@@ -12,8 +12,11 @@
 #include <vector>
 #include "row_set.h"
 #include "../tree/fast_hist_param.h"
+#include "../tree/param.h"
+#include "./quantile.h"
 
 namespace xgboost {
+
 namespace common {
 
 using tree::FastHistParam;
@@ -50,38 +53,29 @@ struct GHistEntry {
   }
 };
 
-
-/*! \brief Cut configuration for one feature */
-struct HistCutUnit {
-  /*! \brief the index pointer of each histunit */
-  const bst_float* cut;
-  /*! \brief number of cutting point, containing the maximum point */
-  uint32_t size;
-  // default constructor
-  HistCutUnit() = default;
-  // constructor
-  HistCutUnit(const bst_float* cut, uint32_t size)
-      : cut(cut), size(size) {}
-};
-
-/*! \brief cut configuration for all the features */
+/*! \brief Cut configuration for all the features. */
 struct HistCutMatrix {
-  /*! \brief unit pointer to rows by element position */
+  /*! \brief Unit pointer to rows by element position */
   std::vector<uint32_t> row_ptr;
   /*! \brief minimum value of each feature */
   std::vector<bst_float> min_val;
   /*! \brief the cut field */
   std::vector<bst_float> cut;
-  /*! \brief Get histogram bound for fid */
-  inline HistCutUnit operator[](bst_uint fid) const {
-    return {dmlc::BeginPtr(cut) + row_ptr[fid],
-                       row_ptr[fid + 1] - row_ptr[fid]};
-  }
+  uint32_t GetBinIdx(const Entry &e);
+
+  using WXQSketch = common::WXQuantileSketch<bst_float, bst_float>;
+
   // create histogram cut matrix given statistics from data
   // using approximate quantile sketch approach
   void Init(DMatrix* p_fmat, uint32_t max_num_bins);
+
+  void Init(std::vector<WXQSketch>* sketchs, uint32_t max_num_bins);
 };
 
+/*! \brief Builds the cut matrix on the GPU */
+void DeviceSketch
+  (const SparsePage& batch, const MetaInfo& info,
+   const tree::TrainParam& param, HistCutMatrix* hmat);
 
 /*!
  * \brief A single row in global histogram index.
@@ -110,18 +104,18 @@ struct GHistIndexMatrix {
   /*! \brief hit count of each index */
   std::vector<size_t> hit_count;
   /*! \brief The corresponding cuts */
-  const HistCutMatrix* cut;
+  HistCutMatrix cut;
   // Create a global histogram matrix, given cut
-  void Init(DMatrix* p_fmat);
+  void Init(DMatrix* p_fmat, int max_num_bins);
   // get i-th row
   inline GHistIndexRow operator[](size_t i) const {
     return {&index[0] + row_ptr[i], row_ptr[i + 1] - row_ptr[i]};
   }
   inline void GetFeatureCounts(size_t* counts) const {
-    auto nfeature = cut->row_ptr.size() - 1;
+    auto nfeature = cut.row_ptr.size() - 1;
     for (unsigned fid = 0; fid < nfeature; ++fid) {
-      auto ibegin = cut->row_ptr[fid];
-      auto iend = cut->row_ptr[fid + 1];
+      auto ibegin = cut.row_ptr[fid];
+      auto iend = cut.row_ptr[fid + 1];
       for (auto i = ibegin; i < iend; ++i) {
         counts[fid] += hit_count[i];
       }
@@ -176,7 +170,7 @@ class GHistIndexBlockMatrix {
 
 /*!
  * \brief histogram of graident statistics for a single node.
- *  Consists of multiple GHistEntry's, each entry showing total graident statistics 
+ *  Consists of multiple GHistEntry's, each entry showing total graident statistics
  *     for that particular bin
  *  Uses global bin id so as to represent all features simultaneously
  */
@@ -253,13 +247,11 @@ class GHistBuilder {
   void BuildHist(const std::vector<GradientPair>& gpair,
                  const RowSetCollection::Elem row_indices,
                  const GHistIndexMatrix& gmat,
-                 const std::vector<bst_uint>& feat_set,
                  GHistRow hist);
   // same, with feature grouping
   void BuildBlockHist(const std::vector<GradientPair>& gpair,
                       const RowSetCollection::Elem row_indices,
                       const GHistIndexBlockMatrix& gmatb,
-                      const std::vector<bst_uint>& feat_set,
                       GHistRow hist);
   // construct a histogram via subtraction trick
   void SubtractionTrick(GHistRow self, GHistRow sibling, GHistRow parent);

@@ -4,6 +4,7 @@
 #include <xgboost/tree_updater.h>
 #include <utility>
 #include <vector>
+#include "../common/common.h"
 #include "param.h"
 #include "updater_gpu_common.cuh"
 
@@ -375,7 +376,7 @@ void argMaxByKey(ExactSplitCandidate* nodeSplits, const GradientPair* gradScans,
                  NodeIdT nodeStart, int len, const TrainParam param,
                  ArgMaxByKeyAlgo algo) {
   dh::FillConst<ExactSplitCandidate, BLKDIM, ITEMS_PER_THREAD>(
-      dh::GetDeviceIdx(param.gpu_id), nodeSplits, nUniqKeys,
+      GPUSet::GetDeviceIdx(param.gpu_id), nodeSplits, nUniqKeys,
       ExactSplitCandidate());
   int nBlks = dh::DivRoundUp(len, ITEMS_PER_THREAD * BLKDIM);
   switch (algo) {
@@ -498,7 +499,7 @@ class GPUMaker : public TreeUpdater {
 
   // devices are only used for resharding the HostDeviceVector passed as a parameter;
   // the algorithm works with a single GPU only
-  GPUSet devices;
+  GPUSet devices_;
 
   dh::CubMemory tmp_mem;
   dh::DVec<GradientPair> tmpScanGradBuff;
@@ -516,7 +517,7 @@ class GPUMaker : public TreeUpdater {
     maxNodes = (1 << (param.max_depth + 1)) - 1;
     maxLeaves = 1 << param.max_depth;
 
-    devices = GPUSet::Range(param.gpu_id, dh::NDevicesAll(param.n_gpus));
+    devices_ = GPUSet::All(param.n_gpus).Normalised(param.gpu_id);
   }
 
   void Update(HostDeviceVector<GradientPair>* gpair, DMatrix* dmat,
@@ -526,7 +527,7 @@ class GPUMaker : public TreeUpdater {
     float lr = param.learning_rate;
     param.learning_rate = lr / trees.size();
 
-    gpair->Reshard(devices);
+    gpair->Reshard(devices_);
 
     try {
       // build tree
@@ -624,7 +625,7 @@ class GPUMaker : public TreeUpdater {
 
   void allocateAllData(int offsetSize) {
     int tmpBuffSize = ScanTempBufferSize(nVals);
-    ba.Allocate(dh::GetDeviceIdx(param.gpu_id), param.silent, &vals, nVals,
+    ba.Allocate(GPUSet::GetDeviceIdx(param.gpu_id), param.silent, &vals, nVals,
                 &vals_cached, nVals, &instIds, nVals, &instIds_cached, nVals,
                 &colOffsets, offsetSize, &gradsInst, nRows, &nodeAssigns, nVals,
                 &nodeLocations, nVals, &nodes, maxNodes, &nodeAssignsPerInst,
@@ -634,7 +635,7 @@ class GPUMaker : public TreeUpdater {
   }
 
   void setupOneTimeData(DMatrix* dmat) {
-    size_t free_memory = dh::AvailableMemory(dh::GetDeviceIdx(param.gpu_id));
+    size_t free_memory = dh::AvailableMemory(GPUSet::GetDeviceIdx(param.gpu_id));
     if (!dmat->SingleColBlock()) {
       throw std::runtime_error("exact::GPUBuilder - must have 1 column block");
     }
@@ -649,7 +650,7 @@ class GPUMaker : public TreeUpdater {
 
   void convertToCsc(DMatrix* dmat, std::vector<float>* fval,
                     std::vector<int>* fId, std::vector<size_t>* offset) {
-    MetaInfo info = dmat->Info();
+    const MetaInfo& info = dmat->Info();
     CHECK(info.num_col_ < std::numeric_limits<int>::max());
     CHECK(info.num_row_ < std::numeric_limits<int>::max());
     nRows = static_cast<int>(info.num_row_);
@@ -660,20 +661,12 @@ class GPUMaker : public TreeUpdater {
     fId->reserve(nCols * nRows);
     // in case you end up with a DMatrix having no column access
     // then make sure to enable that before copying the data!
-    if (!dmat->HaveColAccess(true)) {
-      const std::vector<bool> enable(nCols, true);
-      dmat->InitColAccess(enable, 1, nRows, true);
-    }
-    dmlc::DataIter<ColBatch>* iter = dmat->ColIterator();
-    iter->BeforeFirst();
-    while (iter->Next()) {
-      const ColBatch& batch = iter->Value();
-      for (int i = 0; i < batch.size; i++) {
-        const ColBatch::Inst& col = batch[i];
-        for (const ColBatch::Entry* it = col.data; it != col.data + col.length;
-             it++) {
-          int inst_id = static_cast<int>(it->index);
-          fval->push_back(it->fvalue);
+    for (const auto& batch : dmat->GetSortedColumnBatches()) {
+      for (int i = 0; i < batch.Size(); i++) {
+        auto col = batch[i];
+        for (const Entry& e : col) {
+          int inst_id = static_cast<int>(e.index);
+          fval->push_back(e.fvalue);
           fId->push_back(inst_id);
         }
         offset->push_back(fval->size());
@@ -731,7 +724,7 @@ class GPUMaker : public TreeUpdater {
           nodeAssigns.Current(), instIds.Current(), nodes.Data(),
           colOffsets.Data(), vals.Current(), nVals, nCols);
       // gather the node assignments across all other columns too
-      dh::Gather(dh::GetDeviceIdx(param.gpu_id), nodeAssigns.Current(),
+      dh::Gather(GPUSet::GetDeviceIdx(param.gpu_id), nodeAssigns.Current(),
                  nodeAssignsPerInst.Data(), instIds.Current(), nVals);
       sortKeys(level);
     }
@@ -742,7 +735,7 @@ class GPUMaker : public TreeUpdater {
     // but we don't need more than level+1 bits for sorting!
     SegmentedSort(&tmp_mem, &nodeAssigns, &nodeLocations, nVals, nCols,
                   colOffsets, 0, level + 1);
-    dh::Gather<float, int>(dh::GetDeviceIdx(param.gpu_id), vals.other(),
+    dh::Gather<float, int>(GPUSet::GetDeviceIdx(param.gpu_id), vals.other(),
                            vals.Current(), instIds.other(), instIds.Current(),
                            nodeLocations.Current(), nVals);
     vals.buff().selector ^= 1;
