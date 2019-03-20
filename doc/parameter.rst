@@ -23,9 +23,16 @@ General Parameters
 
   - Which booster to use. Can be ``gbtree``, ``gblinear`` or ``dart``; ``gbtree`` and ``dart`` use tree based models while ``gblinear`` uses linear functions.
 
-* ``silent`` [default=0]
+* ``silent`` [default=0] [Deprecated]
 
-  - 0 means printing running messages, 1 means silent mode
+  - Deprecated.  Please use ``verbosity`` instead.
+
+* ``verbosity`` [default=1]
+
+  - Verbosity of printing messages.  Valid values are 0 (silent),
+    1 (warning), 2 (info), 3 (debug).  Sometimes XGBoost tries to change
+    configurations based on heuristics, which is displayed as warning message.
+    If there's unexpected behaviour, please try to increase value of verbosity.
 
 * ``nthread`` [default to maximum number of threads available if not set]
 
@@ -57,8 +64,8 @@ Parameters for Tree Booster
 
 * ``max_depth`` [default=6]
 
-  - Maximum depth of a tree. Increasing this value will make the model more complex and more likely to overfit. 0 indicates no limit. Note that limit is required when ``grow_policy`` is set of ``depthwise``.
-  - range: [0,∞]
+  - Maximum depth of a tree. Increasing this value will make the model more complex and more likely to overfit. 0 is only accepted in ``lossguided`` growing policy when tree_method is set as ``hist`` and it indicates no limit on depth. Beware that XGBoost aggressively consumes memory when training a deep tree.
+  - range: [0,∞] (0 is only accepted in ``lossguided`` growing policy when tree_method is set as ``hist``)
 
 * ``min_child_weight`` [default=1]
 
@@ -75,15 +82,22 @@ Parameters for Tree Booster
   - Subsample ratio of the training instances. Setting it to 0.5 means that XGBoost would randomly sample half of the training data prior to growing trees. and this will prevent overfitting. Subsampling will occur once in every boosting iteration.
   - range: (0,1]
 
-* ``colsample_bytree`` [default=1]
-
-  - Subsample ratio of columns when constructing each tree. Subsampling will occur once in every boosting iteration.
-  - range: (0,1]
-
-* ``colsample_bylevel`` [default=1]
-
-  - Subsample ratio of columns for each split, in each level. Subsampling will occur each time a new split is made. This paramter has no effect when ``tree_method`` is set to ``hist``.
-  - range: (0,1]
+* ``colsample_bytree``, ``colsample_bylevel``, ``colsample_bynode`` [default=1]
+  - This is a family of parameters for subsampling of columns.
+  - All ``colsample_by*`` parameters have a range of (0, 1], the default value of 1, and
+    specify the fraction of columns to be subsampled.
+  - ``colsample_bytree`` is the subsample ratio of columns when constructing each
+    tree. Subsampling occurs once for every tree constructed.
+  - ``colsample_bylevel`` is the subsample ratio of columns for each level. Subsampling
+    occurs once for every new depth level reached in a tree. Columns are subsampled from
+    the set of columns chosen for the current tree.
+  - ``colsample_bynode`` is the subsample ratio of columns for each node
+    (split). Subsampling occurs once every time a new split is evaluated. Columns are
+    subsampled from the set of columns chosen for the current level.
+  - ``colsample_by*`` parameters work cumulatively. For instance,
+    the combination ``{'colsample_bytree':0.5, 'colsample_bylevel':0.5,
+    'colsample_bynode':0.5}`` with 64 features will leave 4 features to choose from at
+    each split.
 
 * ``lambda`` [default=1, alias: ``reg_lambda``]
 
@@ -96,7 +110,7 @@ Parameters for Tree Booster
 * ``tree_method`` string [default= ``auto``]
 
   - The tree construction algorithm used in XGBoost. See description in the `reference paper <http://arxiv.org/abs/1603.02754>`_.
-  - Distributed and external memory version only support ``tree_method=approx``.
+  - XGBoost supports ``hist`` and ``approx`` for distributed training and only support ``approx`` for external memory version.
   - Choices: ``auto``, ``exact``, ``approx``, ``hist``, ``gpu_exact``, ``gpu_hist``
 
     - ``auto``: Use heuristic to choose the fastest method.
@@ -138,7 +152,7 @@ Parameters for Tree Booster
     - ``refresh``: refreshes tree's statistics and/or leaf values based on the current data. Note that no random subsampling of data rows is performed.
     - ``prune``: prunes the splits where loss < min_split_loss (or gamma).
 
-  - In a distributed setting, the implicit updater sequence value would be adjusted to ``grow_histmaker,prune``.
+  - In a distributed setting, the implicit updater sequence value would be adjusted to ``grow_histmaker,prune`` by default, and you can set ``tree_method`` as ``hist`` to use ``grow_histmaker``. 
 
 * ``refresh_leaf`` [default=1]
 
@@ -156,7 +170,7 @@ Parameters for Tree Booster
 
   - Controls a way new nodes are added to the tree.
   - Currently supported only if ``tree_method`` is set to ``hist``.
-  - Choices: ``depthwise``, ```lossguide``
+  - Choices: ``depthwise``, ``lossguide``
 
     - ``depthwise``: split at nodes closest to the root.
     - ``lossguide``: split at nodes with highest loss change.
@@ -177,6 +191,9 @@ Parameters for Tree Booster
 
     - ``cpu_predictor``: Multicore CPU prediction algorithm.
     - ``gpu_predictor``: Prediction using GPU. Default when ``tree_method`` is ``gpu_exact`` or ``gpu_hist``.
+
+* ``num_parallel_tree``, [default=1]
+  - Number of parallel trees constructed during each iteration. This option is used to support boosted random forest.
 
 Additional parameters for Dart Booster (``booster=dart``)
 =========================================================
@@ -245,8 +262,8 @@ Parameters for Linear Booster (``booster=gblinear``)
 
   - Choice of algorithm to fit linear model
 
-    - ``shotgun``: Parallel coordinate descent algorithm based on shotgun algorithm. Uses 'hogwild' parallelism and therefore produces a nondeterministic solution on each run. 
-    - ``coord_descent``: Ordinary coordinate descent algorithm. Also multithreaded but still produces a deterministic solution. 
+    - ``shotgun``: Parallel coordinate descent algorithm based on shotgun algorithm. Uses 'hogwild' parallelism and therefore produces a nondeterministic solution on each run.
+    - ``coord_descent``: Ordinary coordinate descent algorithm. Also multithreaded but still produces a deterministic solution.
 
 * ``feature_selector`` [default= ``cyclic``]
 
@@ -276,16 +293,13 @@ Learning Task Parameters
 ************************
 Specify the learning task and the corresponding learning objective. The objective options are below:
 
-* ``objective`` [default=reg:linear]
+* ``objective`` [default=reg:squarederror]
 
-  - ``reg:linear``: linear regression
+  - ``reg:squarederror``: regression with squared loss
   - ``reg:logistic``: logistic regression
   - ``binary:logistic``: logistic regression for binary classification, output probability
   - ``binary:logitraw``: logistic regression for binary classification, output score before logistic transformation
   - ``binary:hinge``: hinge loss for binary classification. This makes predictions of 0 or 1, rather than producing probabilities.
-  - ``gpu:reg:linear``, ``gpu:reg:logistic``, ``gpu:binary:logistic``, ``gpu:binary:logitraw``: versions
-    of the corresponding objective functions evaluated on the GPU; note that like the GPU histogram algorithm,
-    they can only be used when the entire training session uses the same dataset
   - ``count:poisson`` --poisson regression for count data, output mean of poisson distribution
 
     - ``max_delta_step`` is set to 0.7 by default in poisson regression (used to safeguard optimization)

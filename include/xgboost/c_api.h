@@ -10,11 +10,12 @@
 #ifdef __cplusplus
 #define XGB_EXTERN_C extern "C"
 #include <cstdio>
+#include <cstdint>
 #else
 #define XGB_EXTERN_C
 #include <stdio.h>
 #include <stdint.h>
-#endif
+#endif  // __cplusplus
 
 // XGBoost C API will include APIs in Rabit C API
 #include <rabit/c_api.h>
@@ -23,7 +24,7 @@
 #define XGB_DLL XGB_EXTERN_C __declspec(dllexport)
 #else
 #define XGB_DLL XGB_EXTERN_C
-#endif
+#endif  // defined(_MSC_VER) || defined(_WIN32)
 
 // manually define unsigned long
 typedef uint64_t bst_ulong;  // NOLINT(*)
@@ -49,7 +50,7 @@ typedef struct {  // NOLINT(*)
   long* offset; // NOLINT(*)
 #else
   int64_t* offset;  // NOLINT(*)
-#endif
+#endif  // __APPLE__
   /*! \brief labels of each instance */
   float* label;
   /*! \brief weight of each instance, can be NULL */
@@ -149,23 +150,6 @@ XGB_DLL int XGDMatrixCreateFromCSREx(const size_t* indptr,
                                      size_t num_col,
                                      DMatrixHandle* out);
 /*!
- * \deprecated
- * \brief create a matrix content from CSR format
- * \param indptr pointer to row headers
- * \param indices findex
- * \param data fvalue
- * \param nindptr number of rows in the matrix + 1
- * \param nelem number of nonzero elements in the matrix
- * \param out created dmatrix
- * \return 0 when success, -1 when failure happens
- */
-XGB_DLL int XGDMatrixCreateFromCSR(const bst_ulong *indptr,
-                                   const unsigned *indices,
-                                   const float *data,
-                                   bst_ulong nindptr,
-                                   bst_ulong nelem,
-                                   DMatrixHandle *out);
-/*!
  * \brief create a matrix content from CSC format
  * \param col_ptr pointer to col headers
  * \param indices findex
@@ -183,23 +167,7 @@ XGB_DLL int XGDMatrixCreateFromCSCEx(const size_t* col_ptr,
                                      size_t nelem,
                                      size_t num_row,
                                      DMatrixHandle* out);
-/*!
- * \deprecated
- * \brief create a matrix content from CSC format
- * \param col_ptr pointer to col headers
- * \param indices findex
- * \param data fvalue
- * \param nindptr number of rows in the matrix + 1
- * \param nelem number of nonzero elements in the matrix
- * \param out created dmatrix
- * \return 0 when success, -1 when failure happens
- */
-XGB_DLL int XGDMatrixCreateFromCSC(const bst_ulong *col_ptr,
-                                   const unsigned *indices,
-                                   const float *data,
-                                   bst_ulong nindptr,
-                                   bst_ulong nelem,
-                                   DMatrixHandle *out);
+
 /*!
  * \brief create matrix content from dense matrix
  * \param data pointer to the data space
@@ -562,7 +530,7 @@ XGB_DLL int XGBoosterGetAttr(BoosterHandle handle,
  *
  * \param handle handle
  * \param key The key of the attribute.
- * \param value The value to be saved. 
+ * \param value The value to be saved.
  *              If nullptr, the attribute would be deleted.
  * \return 0 when success, -1 when failure happens
  */

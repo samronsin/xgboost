@@ -7,9 +7,10 @@
 #include <dmlc/thread_local.h>
 #include <rabit/rabit.h>
 #include <cstdio>
+#include <cstring>
+#include <algorithm>
 #include <vector>
 #include <string>
-#include <cstring>
 #include <memory>
 
 #include "./c_api_error.h"
@@ -52,6 +53,7 @@ class Booster {
 
   inline void LazyInit() {
     if (!configured_) {
+      LoadSavedParamFromAttr();
       learner_->Configure(cfg_);
       configured_ = true;
     }
@@ -61,12 +63,34 @@ class Booster {
     }
   }
 
+  inline void LoadSavedParamFromAttr() {
+    // Locate saved parameters from learner attributes
+    const std::string prefix = "SAVED_PARAM_";
+    for (const std::string& attr_name : learner_->GetAttrNames()) {
+      if (attr_name.find(prefix) == 0) {
+        const std::string saved_param = attr_name.substr(prefix.length());
+        if (std::none_of(cfg_.begin(), cfg_.end(),
+                         [&](const std::pair<std::string, std::string>& x)
+                             { return x.first == saved_param; })) {
+          // If cfg_ contains the parameter already, skip it
+          //   (this is to allow the user to explicitly override its value)
+          std::string saved_param_value;
+          CHECK(learner_->GetAttr(attr_name, &saved_param_value));
+          cfg_.emplace_back(saved_param, saved_param_value);
+        }
+      }
+    }
+  }
+
   inline void LoadModel(dmlc::Stream* fi) {
     learner_->Load(fi);
     initialized_ = true;
   }
 
- public:
+  bool IsInitialized() const { return initialized_; }
+  void Intialize() { initialized_ = true; }
+
+ private:
   bool configured_;
   bool initialized_;
   std::unique_ptr<Learner> learner_;
@@ -280,20 +304,6 @@ XGB_DLL int XGDMatrixCreateFromCSREx(const size_t* indptr,
   API_END();
 }
 
-XGB_DLL int XGDMatrixCreateFromCSR(const xgboost::bst_ulong* indptr,
-                                   const unsigned *indices,
-                                   const bst_float* data,
-                                   xgboost::bst_ulong nindptr,
-                                   xgboost::bst_ulong nelem,
-                                   DMatrixHandle* out) {
-  std::vector<size_t> indptr_(nindptr);
-  for (xgboost::bst_ulong i = 0; i < nindptr; ++i) {
-    indptr_[i] = static_cast<size_t>(indptr[i]);
-  }
-  return XGDMatrixCreateFromCSREx(&indptr_[0], indices, data,
-    static_cast<size_t>(nindptr), static_cast<size_t>(nelem), 0, out);
-}
-
 XGB_DLL int XGDMatrixCreateFromCSCEx(const size_t* col_ptr,
                                      const unsigned* indices,
                                      const bst_float* data,
@@ -348,20 +358,6 @@ XGB_DLL int XGDMatrixCreateFromCSCEx(const size_t* col_ptr,
   mat.info.num_nonzero_ = nelem;
   *out  = new std::shared_ptr<DMatrix>(DMatrix::Create(std::move(source)));
   API_END();
-}
-
-XGB_DLL int XGDMatrixCreateFromCSC(const xgboost::bst_ulong* col_ptr,
-                                   const unsigned* indices,
-                                   const bst_float* data,
-                                   xgboost::bst_ulong nindptr,
-                                   xgboost::bst_ulong nelem,
-                                   DMatrixHandle* out) {
-  std::vector<size_t> col_ptr_(nindptr);
-  for (xgboost::bst_ulong i = 0; i < nindptr; ++i) {
-    col_ptr_[i] = static_cast<size_t>(col_ptr[i]);
-  }
-  return XGDMatrixCreateFromCSCEx(&col_ptr_[0], indices, data,
-    static_cast<size_t>(nindptr), static_cast<size_t>(nelem), 0, out);
 }
 
 XGB_DLL int XGDMatrixCreateFromMat(const bst_float* data,
@@ -1132,7 +1128,7 @@ XGB_DLL int XGBoosterLoadRabitCheckpoint(BoosterHandle handle,
   auto* bst = static_cast<Booster*>(handle);
   *version = rabit::LoadCheckPoint(bst->learner());
   if (*version != 0) {
-    bst->initialized_ = true;
+    bst->Intialize();
   }
   API_END();
 }
@@ -1147,6 +1143,15 @@ XGB_DLL int XGBoosterSaveRabitCheckpoint(BoosterHandle handle) {
     rabit::CheckPoint(bst->learner());
   }
   API_END();
+}
+
+/* hidden method; only known to C++ test suite */
+const std::map<std::string, std::string>&
+QueryBoosterConfigurationArguments(BoosterHandle handle) {
+  CHECK_HANDLE();
+  auto* bst = static_cast<Booster*>(handle);
+  bst->LazyInit();
+  return bst->learner()->GetConfigurationArguments();
 }
 
 // force link rabit

@@ -11,21 +11,11 @@ if [ ${TASK} == "lint" ]; then
     (cat logclean.txt|grep warning) && exit -1
     (cat logclean.txt|grep error) && exit -1
 
-    # Rename cuda files for static analysis
-    for file in  $(find src -name '*.cu'); do
-        cp "$file" "${file/.cu/_tmp.cc}"
-    done
+    if grep -R '<regex>' src include tests/cpp plugin jvm-packages amalgamation; then
+        echo 'Do not use std::regex, since it is not supported by GCC 4.8.x'
+        exit -1
+    fi
 
-    echo "Running clang tidy..."
-    header_filter='(xgboost\/src|xgboost\/include)'
-    for filename in $(find src -name '*.cc'); do
-	    clang-tidy $filename -header-filter=$header_filter -- -Iinclude -Idmlc-core/include -Irabit/include -std=c++11 >> logtidy.txt
-    done
-
-    echo "---------clang-tidy failures----------"
-    # Fail only on warnings related to XGBoost source files
-    (cat logtidy.txt|grep -E 'xgboost.*warning'|grep -v dmlc-core) && exit -1
-    echo "----------------------------"
     exit 0
 fi
 
@@ -47,7 +37,7 @@ if [ ${TASK} == "python_test" ]; then
     echo "-------------------------------"
     source activate python3
     python --version
-    conda install numpy scipy pandas matplotlib nose scikit-learn
+    conda install numpy scipy pandas matplotlib scikit-learn
 
     # Install data table from source
     wget http://releases.llvm.org/5.0.2/clang+llvm-5.0.2-x86_64-linux-gnu-ubuntu-14.04.tar.xz
@@ -56,35 +46,37 @@ if [ ${TASK} == "python_test" ]; then
     python -m pip install datatable --no-binary datatable
 
     python -m pip install graphviz pytest pytest-cov codecov
-    python -m nose -v tests/python || exit -1
-    py.test tests/python --cov=python-package/xgboost
+    python -m pytest -v --fulltrace -s tests/python --cov=python-package/xgboost || exit -1
     codecov
+
     source activate python2
     echo "-------------------------------"
     python --version
-    conda install numpy scipy pandas matplotlib nose scikit-learn
-    python -m pip install graphviz
-    python -m nose -v tests/python || exit -1
+    conda install numpy scipy pandas matplotlib scikit-learn
+    python -m pip install graphviz pytest
+    python -m pytest -v --fulltrace -s tests/python || exit -1
     exit 0
 fi
 
 if [ ${TASK} == "python_lightweight_test" ]; then
     make all || exit -1
+
     echo "-------------------------------"
     source activate python3
     python --version
-    conda install numpy scipy nose
+    conda install numpy scipy
     python -m pip install graphviz pytest pytest-cov codecov
-    python -m nose -v tests/python || exit -1
-    py.test tests/python --cov=python-package/xgboost
+    python -m pytest -v --fulltrace -s tests/python --cov=python-package/xgboost || exit -1
     codecov
+
     source activate python2
     echo "-------------------------------"
     python --version
-    conda install numpy scipy nose
+    conda install numpy scipy pytest
     python -m pip install graphviz
-    python -m nose -v tests/python || exit -1
     python -m pip install flake8==3.4.1
+    python -m pytest -v --fulltrace -s tests/python || exit -1
+
     flake8 --ignore E501 python-package || exit -1
     flake8 --ignore E501 tests/python || exit -1
     exit 0
@@ -95,8 +87,14 @@ if [ ${TASK} == "r_test" ]; then
     export _R_CHECK_TIMINGS_=0
     export R_BUILD_ARGS="--no-build-vignettes --no-manual"
     export R_CHECK_ARGS="--no-vignettes --no-manual"
+    if [ ${TRAVIS_OS_NAME} == "osx" ]; then
+        # Work-around to fix "gfortran command not found" error
+        sudo ln -s $(which gfortran-7) /usr/local/bin/gfortran
+        sudo mkdir -p /usr/local/gfortran/lib/gcc/x86_64-apple-darwin15
+        sudo ln -s /usr/local/lib/gcc/7 /usr/local/gfortran/lib/gcc/x86_64-apple-darwin15/6.1.0
+    fi
 
-    curl -OL http://raw.github.com/craigcitro/r-travis/master/scripts/travis-tool.sh
+    curl -OL https://raw.githubusercontent.com/craigcitro/r-travis/master/scripts/travis-tool.sh
     chmod 755 ./travis-tool.sh
     ./travis-tool.sh bootstrap
     make Rpack
@@ -147,6 +145,11 @@ fi
 if [ ${TASK} == "distributed_test" ]; then
     set -e
     make all || exit -1
+    echo "-------------------------------"
+    source activate python3
+    python --version
+    conda install numpy scipy
+    python -m pip install kubernetes
     cd tests/distributed
     ./runtests.sh
 fi

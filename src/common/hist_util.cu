@@ -24,13 +24,14 @@ namespace common {
 
 using WXQSketch = HistCutMatrix::WXQSketch;
 
-__global__ void find_cuts_k
+__global__ void FindCutsK
 (WXQSketch::Entry* __restrict__ cuts, const bst_float* __restrict__ data,
  const float* __restrict__ cum_weights, int nsamples, int ncuts) {
   // ncuts < nsamples
   int icut = threadIdx.x + blockIdx.x * blockDim.x;
-  if (icut >= ncuts)
+  if (icut >= ncuts) {
     return;
+  }
   WXQSketch::Entry v;
   int isample = 0;
   if (icut == 0) {
@@ -55,7 +56,7 @@ struct IsNotNaN {
   __device__ bool operator()(float a) const { return !isnan(a); }
 };
 
-__global__ void unpack_features_k
+__global__ void UnpackFeaturesK
 (float* __restrict__ fvalues, float* __restrict__ feature_weights,
  const size_t* __restrict__ row_ptrs, const float* __restrict__ weights,
  Entry* entries, size_t nrows_array, int ncols, size_t row_begin_ptr,
@@ -75,7 +76,7 @@ __global__ void unpack_features_k
   // if and only if it is also written to features
   if (!isnan(entry.fvalue) && (weights == nullptr || !isnan(weights[irow]))) {
     fvalues[ind] = entry.fvalue;
-    if (feature_weights != nullptr) {
+    if (feature_weights != nullptr && weights != nullptr) {
       feature_weights[ind] = weights[irow];
     }
   }
@@ -84,7 +85,7 @@ __global__ void unpack_features_k
 // finds quantiles on the GPU
 struct GPUSketcher {
   // manage memory for a single GPU
-  struct DeviceShard {
+  class DeviceShard {
     int device_;
     bst_uint row_begin_;  // The row offset for this shard
     bst_uint row_end_;
@@ -110,25 +111,26 @@ struct GPUSketcher {
     thrust::device_vector<size_t> num_elements_;
     thrust::device_vector<char> tmp_storage_;
 
+   public:
     DeviceShard(int device, bst_uint row_begin, bst_uint row_end,
                 tree::TrainParam param) :
       device_(device), row_begin_(row_begin), row_end_(row_end),
       n_rows_(row_end - row_begin), param_(std::move(param)) {
     }
 
-    void Init(const SparsePage& row_batch, const MetaInfo& info) {
+    void Init(const SparsePage& row_batch, const MetaInfo& info, int gpu_batch_nrows) {
       num_cols_ = info.num_col_;
       has_weights_ = info.weights_.Size() > 0;
 
       // find the batch size
-      if (param_.gpu_batch_nrows == 0) {
+      if (gpu_batch_nrows == 0) {
         // By default, use no more than 1/16th of GPU memory
         gpu_batch_nrows_ = dh::TotalMemory(device_) /
           (16 * num_cols_ * sizeof(Entry));
-      } else if (param_.gpu_batch_nrows == -1) {
+      } else if (gpu_batch_nrows == -1) {
         gpu_batch_nrows_ = n_rows_;
       } else {
-        gpu_batch_nrows_ = param_.gpu_batch_nrows;
+        gpu_batch_nrows_ = gpu_batch_nrows;
       }
       if (gpu_batch_nrows_ > n_rows_) {
         gpu_batch_nrows_ = n_rows_;
@@ -268,7 +270,7 @@ struct GPUSketcher {
       } else if (n_cuts_cur_[icol] > 0) {
         // if more elements than cuts: use binary search on cumulative weights
         int block = 256;
-        find_cuts_k<<<dh::DivRoundUp(n_cuts_cur_[icol], block), block>>>
+        FindCutsK<<<dh::DivRoundUp(n_cuts_cur_[icol], block), block>>>
           (cuts_d_.data().get() + icol * n_cuts_, fvalues_cur_.data().get(),
            weights2_.data().get(), n_unique, n_cuts_cur_[icol]);
         dh::safe_cuda(cudaGetLastError());  // NOLINT
@@ -290,14 +292,14 @@ struct GPUSketcher {
         offset_vec[row_begin_ + batch_row_begin];
       // copy the batch to the GPU
       dh::safe_cuda
-        (cudaMemcpy(entries_.data().get(),
+        (cudaMemcpyAsync(entries_.data().get(),
                     data_vec.data() + offset_vec[row_begin_ + batch_row_begin],
                     n_entries * sizeof(Entry), cudaMemcpyDefault));
       // copy the weights if necessary
       if (has_weights_) {
         const auto& weights_vec = info.weights_.HostVector();
         dh::safe_cuda
-          (cudaMemcpy(weights_.data().get(),
+          (cudaMemcpyAsync(weights_.data().get(),
                       weights_vec.data() + row_begin_ + batch_row_begin,
                       batch_nrows * sizeof(bst_float), cudaMemcpyDefault));
       }
@@ -309,20 +311,16 @@ struct GPUSketcher {
       dim3 block3(64, 4, 1);
       dim3 grid3(dh::DivRoundUp(batch_nrows, block3.x),
                  dh::DivRoundUp(num_cols_, block3.y), 1);
-      unpack_features_k<<<grid3, block3>>>
+      UnpackFeaturesK<<<grid3, block3>>>
         (fvalues_.data().get(), has_weights_ ? feature_weights_.data().get() : nullptr,
          row_ptrs_.data().get() + batch_row_begin,
          has_weights_ ? weights_.data().get() : nullptr, entries_.data().get(),
          gpu_batch_nrows_, num_cols_,
          offset_vec[row_begin_ + batch_row_begin], batch_nrows);
-      dh::safe_cuda(cudaGetLastError());       // NOLINT
-      dh::safe_cuda(cudaDeviceSynchronize());  // NOLINT
 
       for (int icol = 0; icol < num_cols_; ++icol) {
         FindColumnCuts(batch_nrows, icol);
       }
-
-      dh::safe_cuda(cudaDeviceSynchronize());  // NOLINT
 
       // add cuts into sketches
       thrust::copy(cuts_d_.begin(), cuts_d_.end(), cuts_h_.begin());
@@ -344,23 +342,30 @@ struct GPUSketcher {
         SketchBatch(row_batch, info, gpu_batch);
       }
     }
+
+    void GetSummary(WXQSketch::SummaryContainer *summary, size_t const icol) {
+      sketches_[icol].GetSummary(summary);
+    }
   };
 
-  void Sketch(const SparsePage& batch, const MetaInfo& info, HistCutMatrix* hmat) {
+  void Sketch(const SparsePage& batch, const MetaInfo& info,
+              HistCutMatrix* hmat, int gpu_batch_nrows) {
     // create device shards
     shards_.resize(dist_.Devices().Size());
     dh::ExecuteIndexShards(&shards_, [&](int i, std::unique_ptr<DeviceShard>& shard) {
         size_t start = dist_.ShardStart(info.num_row_, i);
         size_t size = dist_.ShardSize(info.num_row_, i);
-        shard = std::unique_ptr<DeviceShard>
-          (new DeviceShard(dist_.Devices()[i], start, start + size, param_));
+        shard = std::unique_ptr<DeviceShard>(
+            new DeviceShard(dist_.Devices().DeviceId(i),
+                            start, start + size, param_));
       });
 
     // compute sketches for each shard
-    dh::ExecuteShards(&shards_, [&](std::unique_ptr<DeviceShard>& shard) {
-        shard->Init(batch, info);
-        shard->Sketch(batch, info);
-      });
+    dh::ExecuteIndexShards(&shards_,
+                           [&](int idx, std::unique_ptr<DeviceShard>& shard) {
+                             shard->Init(batch, info, gpu_batch_nrows);
+                             shard->Sketch(batch, info);
+                           });
 
     // merge the sketches from all shards
     // TODO(canonizer): do it in a tree-like reduction
@@ -369,8 +374,8 @@ struct GPUSketcher {
     WXQSketch::SummaryContainer summary;
     for (int icol = 0; icol < num_cols; ++icol) {
       sketches[icol].Init(batch.Size(), 1.0 / (8 * param_.max_bin));
-      for (int shard = 0; shard < shards_.size(); ++shard) {
-        shards_[shard]->sketches_[icol].GetSummary(&summary);
+      for (auto &shard : shards_) {
+        shard->GetSummary(&summary, icol);
         sketches[icol].PushSummary(summary);
       }
     }
@@ -379,10 +384,10 @@ struct GPUSketcher {
   }
 
   GPUSketcher(tree::TrainParam param, size_t n_rows) : param_(std::move(param)) {
-    dist_ = GPUDistribution::Block(GPUSet::All(param_.n_gpus, n_rows).
-                                   Normalised(param_.gpu_id));
+    dist_ = GPUDistribution::Block(GPUSet::All(param_.gpu_id, param_.n_gpus, n_rows));
   }
 
+ private:
   std::vector<std::unique_ptr<DeviceShard>> shards_;
   tree::TrainParam param_;
   GPUDistribution dist_;
@@ -390,9 +395,9 @@ struct GPUSketcher {
 
 void DeviceSketch
   (const SparsePage& batch, const MetaInfo& info,
-   const tree::TrainParam& param, HistCutMatrix* hmat) {
+   const tree::TrainParam& param, HistCutMatrix* hmat, int gpu_batch_nrows) {
   GPUSketcher sketcher(param, info.num_row_);
-  sketcher.Sketch(batch, info, hmat);
+  sketcher.Sketch(batch, info, hmat, gpu_batch_nrows);
 }
 
 }  // namespace common

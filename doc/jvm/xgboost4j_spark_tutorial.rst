@@ -57,13 +57,21 @@ and then refer to the snapshot dependency by adding:
 
   <dependency>
       <groupId>ml.dmlc</groupId>
-      <artifactId>xgboost4j</artifactId>
+      <artifactId>xgboost4j-spark</artifactId>
       <version>next_version_num-SNAPSHOT</version>
   </dependency>
 
-.. note:: XGBoost4J-Spark requires Spark 2.3+
+.. note:: XGBoost4J-Spark requires Apache Spark 2.3+
 
-  XGBoost4J-Spark now requires Spark 2.3+. Latest versions of XGBoost4J-Spark uses facilities of `org.apache.spark.ml.param.shared` extensively to provide for a tight integration with Spark MLLIB framework, and these facilities are not fully available on earlier versions of Spark.
+  XGBoost4J-Spark now requires **Apache Spark 2.3+**. Latest versions of XGBoost4J-Spark uses facilities of `org.apache.spark.ml.param.shared` extensively to provide for a tight integration with Spark MLLIB framework, and these facilities are not fully available on earlier versions of Spark.
+
+  Also, make sure to install Spark directly from `Apache website <https://spark.apache.org/>`_. **Upstream XGBoost is not guaranteed to work with third-party distributions of Spark, such as Cloudera Spark.** Consult appropriate third parties to obtain their distribution of XGBoost.
+
+Installation from maven repo
+
+.. note:: Use of Python in XGBoost4J-Spark
+
+  By default, we use the tracker in `dmlc-core <https://github.com/dmlc/dmlc-core/tree/master/tracker>`_ to drive the training with XGBoost4J-Spark. It requires Python 2.7+. We also have an experimental Scala version of tracker which can be enabled by passing the parameter ``tracker_conf`` as ``scala``.
 
 Data Preparation
 ================
@@ -182,6 +190,20 @@ After we set XGBoostClassifier parameters and feature/label column, we can build
 .. code-block:: scala
 
   val xgbClassificationModel = xgbClassifier.fit(xgbInput)
+
+Early Stopping
+----------------
+
+Early stopping is a feature to prevent the unnecessary training iterations. By specifying ``num_early_stopping_rounds`` or directly call ``setNumEarlyStoppingRounds`` over a XGBoostClassifier or XGBoostRegressor, we can define number of rounds if the evaluation metric going away from the best iteration and early stop training iterations.
+
+In additional to ``num_early_stopping_rounds``, you also need to define ``maximize_evaluation_metrics`` or call ``setMaximizeEvaluationMetrics`` to specify whether you want to maximize or minimize the metrics in training.
+
+For example, we need to maximize the evaluation metrics (set ``maximize_evaluation_metrics`` with true), and set ``num_early_stopping_rounds`` with 5. The evaluation metric of 10th iteration is the maximum one until now. In the following iterations, if there is no evaluation metric greater than the 10th iteration's (best one), the traning would be early stopped at 15th iteration.  
+
+Training with Evaluation Sets
+----------------
+
+You can also monitor the performance of the model during training with multiple evaluation datasets. By specifying ``eval_sets`` or call ``setEvalSets`` over a XGBoostClassifier or XGBoostRegressor, you can pass in multiple evaluation datasets typed as a Map from String to DataFrame.
 
 Prediction
 ==========

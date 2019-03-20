@@ -5,12 +5,12 @@
           a refresh is needed to make the statistics exactly correct
  * \author Tianqi Chen
  */
-
+#include <rabit/rabit.h>
 #include <xgboost/base.h>
 #include <xgboost/tree_updater.h>
 #include <vector>
 #include <algorithm>
-#include "../common/sync.h"
+
 #include "../common/quantile.h"
 #include "../common/group_data.h"
 #include "./updater_basemaker-inl.h"
@@ -83,26 +83,17 @@ class SketchMaker: public BaseMaker {
     double neg_grad;
     /*! \brief sum of hessian statistics */
     double sum_hess;
-    SKStats() = default;
-    // constructor
-    explicit SKStats(const TrainParam &param) {
-      this->Clear();
-    }
-    /*! \brief clear the statistics */
-    inline void Clear() {
-      neg_grad = pos_grad = sum_hess = 0.0f;
-    }
+
+    SKStats() : pos_grad{0}, neg_grad{0}, sum_hess{0} {}
+
     // accumulate statistics
-    inline void Add(const std::vector<GradientPair> &gpair,
-                    const MetaInfo &info,
-                    bst_uint ridx) {
-      const GradientPair &b = gpair[ridx];
-      if (b.GetGrad() >= 0.0f) {
-        pos_grad += b.GetGrad();
+    void Add(const GradientPair& gpair) {
+      if (gpair.GetGrad() >= 0.0f) {
+        pos_grad += gpair.GetGrad();
       } else {
-        neg_grad -= b.GetGrad();
+        neg_grad -= gpair.GetGrad();
       }
-      sum_hess += b.GetHess();
+      sum_hess += gpair.GetHess();
     }
     /*! \brief calculate gain of the solution */
     inline double CalcGain(const TrainParam &param) const {
@@ -127,9 +118,6 @@ class SketchMaker: public BaseMaker {
     /*! \brief same as add, reduce is used in All Reduce */
     inline static void Reduce(SKStats &a, const SKStats &b) { // NOLINT(*)
       a.Add(b);
-    }
-    /*! \brief set leaf vector value based on statistics */
-    inline void SetLeafVec(const TrainParam &param, bst_float *vec) const {
     }
   };
   inline void BuildSketch(const std::vector<GradientPair> &gpair,
@@ -284,16 +272,21 @@ class SketchMaker: public BaseMaker {
       const int nid = qexpand_[wid];
       const SplitEntry &best = sol[wid];
       // set up the values
-      p_tree->Stat(nid).loss_chg = best.loss_chg;
       this->SetStats(nid, node_stats_[nid], p_tree);
       // now we know the solution in snode[nid], set split
       if (best.loss_chg > kRtEps) {
-        p_tree->AddChilds(nid);
-        (*p_tree)[nid].SetSplit(best.SplitIndex(),
-                                 best.split_value, best.DefaultLeft());
-        // mark right child as 0, to indicate fresh leaf
-        (*p_tree)[(*p_tree)[nid].LeftChild()].SetLeaf(0.0f, 0);
-        (*p_tree)[(*p_tree)[nid].RightChild()].SetLeaf(0.0f, 0);
+        bst_float base_weight = node_stats_[nid].CalcWeight(param_);
+        bst_float left_leaf_weight =
+            CalcWeight(param_, best.left_sum.sum_grad, best.left_sum.sum_hess) *
+            param_.learning_rate;
+        bst_float right_leaf_weight =
+            CalcWeight(param_, best.right_sum.sum_grad,
+                       best.right_sum.sum_hess) *
+            param_.learning_rate;
+        p_tree->ExpandNode(nid, best.SplitIndex(), best.split_value,
+                           best.DefaultLeft(), base_weight, left_leaf_weight,
+                           right_leaf_weight, best.loss_chg,
+                           node_stats_[nid].sum_hess);
       } else {
         (*p_tree)[nid].SetLeaf(p_tree->Stat(nid).base_weight * param_.learning_rate);
       }
@@ -303,7 +296,6 @@ class SketchMaker: public BaseMaker {
   inline void SetStats(int nid, const SKStats &node_sum, RegTree *p_tree) {
     p_tree->Stat(nid).base_weight = static_cast<bst_float>(node_sum.CalcWeight(param_));
     p_tree->Stat(nid).sum_hess = static_cast<bst_float>(node_sum.sum_hess);
-    node_sum.SetLeafVec(param_, p_tree->Leafvec(nid));
   }
   inline void EnumerateSplit(const WXQSketch::Summary &pos_grad,
                              const WXQSketch::Summary &neg_grad,
@@ -344,7 +336,9 @@ class SketchMaker: public BaseMaker {
       if (s.sum_hess >= param_.min_child_weight &&
           c.sum_hess >= param_.min_child_weight) {
         double loss_chg = s.CalcGain(param_) + c.CalcGain(param_) - root_gain;
-        best->Update(static_cast<bst_float>(loss_chg), fid, fsplits[i], false);
+        best->Update(static_cast<bst_float>(loss_chg), fid, fsplits[i], false,
+                     GradStats(s.pos_grad - s.neg_grad , s.sum_hess),
+                     GradStats(c.pos_grad - c.neg_grad, c.sum_hess));
       }
       // backward
       c.SetSubstract(feat_sum, s);
@@ -352,7 +346,9 @@ class SketchMaker: public BaseMaker {
       if (s.sum_hess >= param_.min_child_weight &&
           c.sum_hess >= param_.min_child_weight) {
         double loss_chg = s.CalcGain(param_) + c.CalcGain(param_) - root_gain;
-        best->Update(static_cast<bst_float>(loss_chg), fid, fsplits[i], true);
+        best->Update(static_cast<bst_float>(loss_chg), fid, fsplits[i], true,
+                     GradStats(s.pos_grad - s.neg_grad, s.sum_hess),
+                     GradStats(c.pos_grad - c.neg_grad, c.sum_hess));
       }
     }
     {
@@ -363,8 +359,10 @@ class SketchMaker: public BaseMaker {
           c.sum_hess >= param_.min_child_weight) {
         bst_float cpt = fsplits.back();
         double loss_chg = s.CalcGain(param_) + c.CalcGain(param_) - root_gain;
-        best->Update(static_cast<bst_float>(loss_chg),
-                     fid, cpt + std::abs(cpt) + 1.0f, false);
+        best->Update(static_cast<bst_float>(loss_chg), fid,
+                     cpt + std::abs(cpt) + 1.0f, false,
+                     GradStats(s.pos_grad - s.neg_grad, s.sum_hess),
+                     GradStats(c.pos_grad - c.neg_grad, c.sum_hess));
       }
     }
   }

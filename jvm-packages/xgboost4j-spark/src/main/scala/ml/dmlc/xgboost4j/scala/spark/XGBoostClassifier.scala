@@ -43,7 +43,7 @@ import org.apache.spark.broadcast.Broadcast
 
 private[spark] trait XGBoostClassifierParams extends GeneralParams with LearningTaskParams
   with BoosterParams with HasWeightCol with HasBaseMarginCol with HasNumClass with ParamMapFuncs
-  with HasLeafPredictionCol with HasContribPredictionCol
+  with HasLeafPredictionCol with HasContribPredictionCol with NonParamVariables
 
 class XGBoostClassifier (
     override val uid: String,
@@ -113,6 +113,8 @@ class XGBoostClassifier (
 
   def setMaxBins(value: Int): this.type = set(maxBins, value)
 
+  def setMaxLeaves(value: Int): this.type = set(maxLeaves, value)
+
   def setSketchEps(value: Double): this.type = set(sketchEps, value)
 
   def setScalePosWeight(value: Double): this.type = set(scalePosWeight, value)
@@ -139,6 +141,9 @@ class XGBoostClassifier (
   def setTrainTestRatio(value: Double): this.type = set(trainTestRatio, value)
 
   def setNumEarlyStoppingRounds(value: Int): this.type = set(numEarlyStoppingRounds, value)
+
+  def setMaximizeEvaluationMetrics(value: Boolean): this.type =
+    set(maximizeEvaluationMetrics, value)
 
   def setCustomObj(value: ObjectiveTrait): this.type = set(customObj, value)
 
@@ -179,24 +184,19 @@ class XGBoostClassifier (
       col($(baseMarginCol))
     }
 
-    val instances: RDD[XGBLabeledPoint] = dataset.select(
-      col($(featuresCol)),
-      col($(labelCol)).cast(FloatType),
-      baseMargin.cast(FloatType),
-      weight.cast(FloatType)
-    ).rdd.map { case Row(features: Vector, label: Float, baseMargin: Float, weight: Float) =>
-      val (indices, values) = features match {
-        case v: SparseVector => (v.indices, v.values.map(_.toFloat))
-        case v: DenseVector => (null, v.values.map(_.toFloat))
-      }
-      XGBLabeledPoint(label, indices, values, baseMargin = baseMargin, weight = weight)
+    val trainingSet: RDD[XGBLabeledPoint] = DataUtils.convertDataFrameToXGBLabeledPointRDDs(
+      col($(labelCol)), col($(featuresCol)), weight, baseMargin,
+      None, dataset.asInstanceOf[DataFrame]).head
+    val evalRDDMap = getEvalSets(xgboostParams).map {
+      case (name, dataFrame) => (name,
+        DataUtils.convertDataFrameToXGBLabeledPointRDDs(col($(labelCol)), col($(featuresCol)),
+          weight, baseMargin, None, dataFrame).head)
     }
     transformSchema(dataset.schema, logging = true)
     val derivedXGBParamMap = MLlib2XGBoostParams
     // All non-null param maps in XGBoostClassifier are in derivedXGBParamMap.
-    val (_booster, _metrics) = XGBoost.trainDistributed(instances, derivedXGBParamMap,
-      $(numRound), $(numWorkers), $(customObj), $(customEval), $(useExternalMemory),
-      $(missing), hasGroup = false)
+    val (_booster, _metrics) = XGBoost.trainDistributed(trainingSet, derivedXGBParamMap,
+      hasGroup = false, evalRDDMap)
     val model = new XGBoostClassificationModel(uid, _numClasses, _booster)
     val summary = XGBoostTrainingSummary(_metrics)
     model.setSummary(summary)
@@ -287,12 +287,12 @@ class XGBoostClassificationModel private[ml](
     val bBooster = dataset.sparkSession.sparkContext.broadcast(_booster)
     val appName = dataset.sparkSession.sparkContext.appName
 
-    val rdd = dataset.asInstanceOf[Dataset[Row]].rdd.mapPartitions { rowIterator =>
+    val inputRDD = dataset.asInstanceOf[Dataset[Row]].rdd
+    val predictionRDD = dataset.asInstanceOf[Dataset[Row]].rdd.mapPartitions { rowIterator =>
       if (rowIterator.hasNext) {
         val rabitEnv = Array("DMLC_TASK_ID" -> TaskContext.getPartitionId().toString).toMap
         Rabit.init(rabitEnv.asJava)
-        val (rowItr1, rowItr2) = rowIterator.duplicate
-        val featuresIterator = rowItr2.map(row => row.getAs[Vector](
+        val featuresIterator = rowIterator.map(row => row.getAs[Vector](
           $(featuresCol))).toList.iterator
         import DataUtils._
         val cacheInfo = {
@@ -309,19 +309,27 @@ class XGBoostClassificationModel private[ml](
           val Array(rawPredictionItr, probabilityItr, predLeafItr, predContribItr) =
             producePredictionItrs(bBooster, dm)
           Rabit.shutdown()
-          produceResultIterator(rowItr1, rawPredictionItr, probabilityItr, predLeafItr,
+          Iterator(rawPredictionItr, probabilityItr, predLeafItr,
             predContribItr)
         } finally {
           dm.delete()
         }
       } else {
-        Iterator[Row]()
+        Iterator()
       }
+    }
+    val resultRDD = inputRDD.zipPartitions(predictionRDD, preservesPartitioning = true) {
+      case (inputIterator, predictionItr) =>
+        if (inputIterator.hasNext) {
+          produceResultIterator(inputIterator, predictionItr.next(), predictionItr.next(),
+            predictionItr.next(), predictionItr.next())
+        } else {
+          Iterator()
+        }
     }
 
     bBooster.unpersist(blocking = false)
-
-    dataset.sparkSession.createDataFrame(rdd, generateResultSchema(schema))
+    dataset.sparkSession.createDataFrame(resultRDD, generateResultSchema(schema))
   }
 
   private def produceResultIterator(
@@ -413,7 +421,9 @@ class XGBoostClassificationModel private[ml](
     var numColsOutput = 0
 
     val rawPredictionUDF = udf { rawPrediction: mutable.WrappedArray[Float] =>
-      Vectors.dense(rawPrediction.map(_.toDouble).toArray)
+      val raw = rawPrediction.map(_.toDouble).toArray
+      val rawPredictions = if (numClasses == 2) Array(-raw(0), raw(0)) else raw
+      Vectors.dense(rawPredictions)
     }
 
     val probabilityUDF = udf { probability: mutable.WrappedArray[Float] =>

@@ -16,13 +16,13 @@ namespace obj {
 
 #if defined(XGBOOST_USE_CUDA)
 DMLC_REGISTRY_FILE_TAG(hinge_obj_gpu);
-#endif
+#endif  // defined(XGBOOST_USE_CUDA)
 
 struct HingeObjParam : public dmlc::Parameter<HingeObjParam> {
   int n_gpus;
   int gpu_id;
   DMLC_DECLARE_PARAMETER(HingeObjParam) {
-    DMLC_DECLARE_FIELD(n_gpus).set_default(0).set_lower_bound(0)
+    DMLC_DECLARE_FIELD(n_gpus).set_default(1).set_lower_bound(GPUSet::kAll)
         .describe("Number of GPUs to use for multi-gpu algorithms.");
     DMLC_DECLARE_FIELD(gpu_id)
         .set_lower_bound(0)
@@ -38,7 +38,7 @@ class HingeObj : public ObjFunction {
   void Configure(
       const std::vector<std::pair<std::string, std::string> > &args) override {
     param_.InitAllowUnknown(args);
-    devices_ = GPUSet::All(param_.n_gpus).Normalised(param_.gpu_id);
+    devices_ = GPUSet::All(param_.gpu_id, param_.n_gpus);
     label_correct_.Resize(devices_.IsEmpty() ? 1 : devices_.Size());
   }
 

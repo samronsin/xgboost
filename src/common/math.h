@@ -7,6 +7,8 @@
 #ifndef XGBOOST_COMMON_MATH_H_
 #define XGBOOST_COMMON_MATH_H_
 
+#include <xgboost/base.h>
+
 #include <utility>
 #include <vector>
 #include <cmath>
@@ -116,7 +118,6 @@ inline static bool CmpSecond(const std::pair<float, unsigned> &a,
 #if XGBOOST_STRICT_R_MODE
 // check nan
 bool CheckNAN(double v);
-double LogGamma(double v);
 #else
 template<typename T>
 inline bool CheckNAN(T v) {
@@ -124,11 +125,21 @@ inline bool CheckNAN(T v) {
   return (_isnan(v) != 0);
 #else
   return std::isnan(v);
-#endif
+#endif  // _MSC_VER
 }
+#endif  // XGBOOST_STRICT_R_MODE_
+
+// GPU version is not uploaded in CRAN anyway.
+// Specialize only when using R with CPU.
+#if XGBOOST_STRICT_R_MODE && !defined(XGBOOST_USE_CUDA)
+double LogGamma(double v);
+
+#else  // Not R or R with GPU.
+
 template<typename T>
-inline T LogGamma(T v) {
+XGBOOST_DEVICE inline T LogGamma(T v) {
 #ifdef _MSC_VER
+
 #if _MSC_VER >= 1800
   return lgamma(v);
 #else
@@ -136,12 +147,15 @@ inline T LogGamma(T v) {
                 ", poisson regression will be disabled")
   utils::Error("lgamma function was not available until VS2013");
   return static_cast<T>(1.0);
-#endif
+#endif  // _MSC_VER >= 1800
+
 #else
   return lgamma(v);
-#endif
+#endif  // _MSC_VER
 }
-#endif  // XGBOOST_STRICT_R_MODE_
+
+#endif  // XGBOOST_STRICT_R_MODE && !defined(XGBOOST_USE_CUDA)
+
 }  // namespace common
 }  // namespace xgboost
 #endif  // XGBOOST_COMMON_MATH_H_

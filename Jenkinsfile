@@ -53,7 +53,7 @@ pipeline {
                     parallel (buildMatrix.findAll{it['enabled']}.collectEntries{ c ->
                         def buildName = utils.getBuildName(c)
                         utils.buildFactory(buildName, c, false, this.&buildPlatformCmake)
-                    })
+                    } + [ "clang-tidy" : { buildClangTidyJob() } ])
                 }
             }
         }
@@ -73,7 +73,7 @@ def buildPlatformCmake(buildName, conf, nodeReq, dockerTarget) {
     }
     def test_suite = conf["withGpu"] ? (conf["multiGpu"] ? "mgpu" : "gpu") : "cpu"
     // Build node - this is returned result
-    retry(3) {
+    retry(1) {
         node(nodeReq) {
             unstash name: 'srcs'
             echo """
@@ -96,9 +96,32 @@ def buildPlatformCmake(buildName, conf, nodeReq, dockerTarget) {
                 # Test the wheel for compatibility on a barebones CPU container
                 ${dockerRun} release ${dockerArgs} bash -c " \
                     pip install --user python-package/dist/xgboost-*-none-any.whl && \
-                    python -m nose tests/python"
+		    pytest -v --fulltrace -s tests/python"
+                # Test the wheel for compatibility on CUDA 10.0 container
+                ${dockerRun} gpu --build-arg CUDA_VERSION=10.0 bash -c " \
+                    pip install --user python-package/dist/xgboost-*-none-any.whl && \
+		    pytest -v -s --fulltrace -m '(not mgpu) and (not slow)' tests/python-gpu"
                 """
             }
         }
     }
 }
+
+/**
+ * Run a clang-tidy job on a GPU machine
+ */
+def buildClangTidyJob() {
+    def nodeReq = "linux && gpu && unrestricted"
+    node(nodeReq) {
+        unstash name: 'srcs'
+        echo "Running clang-tidy job..."
+        // Invoke command inside docker
+        // Install Google Test and Python yaml
+        dockerTarget = "clang_tidy"
+        dockerArgs = "--build-arg CUDA_VERSION=9.2"
+        sh """
+        ${dockerRun} ${dockerTarget} ${dockerArgs} tests/ci_build/clang_tidy.sh
+        """
+      }
+  }
+

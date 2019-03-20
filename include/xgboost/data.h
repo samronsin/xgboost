@@ -9,6 +9,7 @@
 
 #include <dmlc/base.h>
 #include <dmlc/data.h>
+#include <rabit/rabit.h>
 #include <cstring>
 #include <memory>
 #include <numeric>
@@ -169,8 +170,16 @@ class SparsePage {
   inline Inst operator[](size_t i) const {
     const auto& data_vec = data.HostVector();
     const auto& offset_vec = offset.HostVector();
+    size_t size;
+    // in distributed mode, some partitions may not get any instance for a feature. Therefore
+    // we should set the size as zero
+    if (rabit::IsDistributed() && i + 1 >= offset_vec.size()) {
+      size = 0;
+    } else {
+      size = offset_vec[i + 1] - offset_vec[i];
+    }
     return {data_vec.data() + offset_vec[i],
-            static_cast<Inst::index_type>(offset_vec[i + 1] - offset_vec[i])};
+            static_cast<Inst::index_type>(size)};
   }
 
   /*! \brief constructor */
@@ -241,42 +250,17 @@ class SparsePage {
    * \brief Push row block into the page.
    * \param batch the row batch.
    */
-  inline void Push(const dmlc::RowBlock<uint32_t>& batch) {
-    auto& data_vec = data.HostVector();
-    auto& offset_vec = offset.HostVector();
-    data_vec.reserve(data.Size() + batch.offset[batch.size] - batch.offset[0]);
-    offset_vec.reserve(offset.Size() + batch.size);
-    CHECK(batch.index != nullptr);
-    for (size_t i = 0; i < batch.size; ++i) {
-      offset_vec.push_back(offset_vec.back() + batch.offset[i + 1] - batch.offset[i]);
-    }
-    for (size_t i = batch.offset[0]; i < batch.offset[batch.size]; ++i) {
-      uint32_t index = batch.index[i];
-      bst_float fvalue = batch.value == nullptr ? 1.0f : batch.value[i];
-      data_vec.emplace_back(index, fvalue);
-    }
-    CHECK_EQ(offset_vec.back(), data.Size());
-  }
+  void Push(const dmlc::RowBlock<uint32_t>& batch);
   /*!
    * \brief Push a sparse page
    * \param batch the row page
    */
-  inline void Push(const SparsePage &batch) {
-    auto& data_vec = data.HostVector();
-    auto& offset_vec = offset.HostVector();
-    const auto& batch_offset_vec = batch.offset.HostVector();
-    const auto& batch_data_vec = batch.data.HostVector();
-    size_t top = offset_vec.back();
-    data_vec.resize(top + batch.data.Size());
-    std::memcpy(dmlc::BeginPtr(data_vec) + top,
-                dmlc::BeginPtr(batch_data_vec),
-                sizeof(Entry) * batch.data.Size());
-    size_t begin = offset.Size();
-    offset_vec.resize(begin + batch.Size());
-    for (size_t i = 0; i < batch.Size(); ++i) {
-      offset_vec[i + begin] = top + batch_offset_vec[i + 1];
-    }
-  }
+  void Push(const SparsePage &batch);
+  /*!
+   * \brief Push a SparsePage stored in CSC format
+   * \param batch The row batch to be pushed
+   */
+  void PushCSC(const SparsePage& batch);
   /*!
    * \brief Push one instance into page
    *  \param inst an instance row
@@ -285,7 +269,6 @@ class SparsePage {
     auto& data_vec = data.HostVector();
     auto& offset_vec = offset.HostVector();
     offset_vec.push_back(offset_vec.back() + inst.size());
-
     size_t begin = data_vec.size();
     data_vec.resize(begin + inst.size());
     if (inst.size() != 0) {

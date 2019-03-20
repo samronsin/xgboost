@@ -48,9 +48,15 @@ The data is stored in a :py:class:`DMatrix <xgboost.DMatrix>` object.
     dtrain = xgb.DMatrix('train.csv?format=csv&label_column=0')
     dtest = xgb.DMatrix('test.csv?format=csv&label_column=0')
 
-  (Note that XGBoost does not support categorical features; if your data contains
-  categorical features, load it as a NumPy array first and then perform
-  `one-hot encoding <http://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.OneHotEncoder.html>`_.)
+  .. note:: Categorical features not supported
+
+    Note that XGBoost does not support categorical features; if your data contains
+    categorical features, load it as a NumPy array first and then perform
+    `one-hot encoding <http://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.OneHotEncoder.html>`_.
+
+  .. note:: Use Pandas to load CSV files with headers
+
+    Currently, the DMLC data parser cannot parse CSV files with headers. Use Pandas (see below) to read CSV files with headers.
 
 * To load a NumPy array into :py:class:`DMatrix <xgboost.DMatrix>`:
 
@@ -94,6 +100,10 @@ The data is stored in a :py:class:`DMatrix <xgboost.DMatrix>` object.
 
     w = np.random.rand(5, 1)
     dtrain = xgb.DMatrix(data, label=label, missing=-999.0, weight=w)
+
+When performing ranking tasks, the number of weights should be equal
+to number of groups.
+
 
 Setting Parameters
 ------------------
@@ -155,6 +165,10 @@ A saved model can be loaded as follows:
   bst = xgb.Booster({'nthread': 4})  # init model
   bst.load_model('model.bin')  # load data
 
+Methods including `update` and `boost` from `xgboost.Booster` are designed for
+internal usage only.  The wrapper function `xgboost.train` does some
+pre-configuration including setting up caches and some other parameters.
+
 Early Stopping
 --------------
 If you have a validation set, you can use early stopping to find the optimal number of boosting rounds.
@@ -209,4 +223,3 @@ When you use ``IPython``, you can use the :py:meth:`xgboost.to_graphviz` functio
 .. code-block:: python
 
   xgb.to_graphviz(bst, num_trees=2)
-
