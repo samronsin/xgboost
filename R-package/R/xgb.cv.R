@@ -2,12 +2,15 @@
 #'
 #' The cross validation function of xgboost
 #'
-#' @param params the list of parameters. Commonly used ones are:
+#' @param params the list of parameters. The complete list of parameters is 
+#'   available in the \href{http://xgboost.readthedocs.io/en/latest/parameter.html}{online documentation}. Below
+#'   is a shorter summary:
 #' \itemize{
 #'   \item \code{objective} objective function, common ones are
 #'   \itemize{
-#'     \item \code{reg:squarederror} Regression with squared loss
-#'     \item \code{binary:logistic} logistic regression for classification
+#'     \item \code{reg:squarederror} Regression with squared loss.
+#'     \item \code{binary:logistic} logistic regression for classification.
+#'     \item See \code{\link[=xgb.train]{xgb.train}()} for complete list of objectives.
 #'   }
 #'   \item \code{eta} step size of each boosting step
 #'   \item \code{max_depth} maximum depth of the tree
@@ -39,7 +42,7 @@
 #' }
 #' @param obj customized objective function. Returns gradient and second order
 #'        gradient with given prediction and dtrain.
-#' @param feval custimized evaluation function. Returns
+#' @param feval customized evaluation function. Returns
 #'        \code{list(metric='metric-name', value='metric-value')} with given
 #'        prediction and dtrain.
 #' @param stratified a \code{boolean} indicating whether sampling of folds should be stratified
@@ -47,6 +50,8 @@
 #' @param folds \code{list} provides a possibility to use a list of pre-defined CV folds
 #'        (each element must be a vector of test fold's indices). When folds are supplied,
 #'        the \code{nfold} and \code{stratified} parameters are ignored.
+#' @param train_folds \code{list} list specifying which indicies to use for training. If \code{NULL}
+#'        (the default) all indices not specified in \code{folds} will be used for training.
 #' @param verbose \code{boolean}, print the statistics during the process
 #' @param print_every_n Print each n-th iteration evaluation messages when \code{verbose>0}.
 #'        Default is 1 which means all messages are printed. This parameter is passed to the
@@ -84,7 +89,7 @@
 #'         capture parameters changed by the \code{\link{cb.reset.parameters}} callback.
 #'   \item \code{callbacks} callback functions that were either automatically assigned or
 #'         explicitly passed.
-#'   \item \code{evaluation_log} evaluation history storead as a \code{data.table} with the
+#'   \item \code{evaluation_log} evaluation history stored as a \code{data.table} with the
 #'         first column corresponding to iteration number and the rest corresponding to the
 #'         CV-based evaluation means and standard deviations for the training and test CV-sets.
 #'         It is created by the \code{\link{cb.evaluation.log}} callback.
@@ -99,7 +104,7 @@
 #'         (only available with early stopping).
 #'   \item \code{pred} CV prediction values available when \code{prediction} is set.
 #'         It is either vector or matrix (see \code{\link{cb.cv.predict}}).
-#'   \item \code{models} a liost of the CV folds' models. It is only available with the explicit
+#'   \item \code{models} a list of the CV folds' models. It is only available with the explicit
 #'         setting of the \code{cb.cv.predict(save_models = TRUE)} callback.
 #' }
 #'
@@ -114,7 +119,7 @@
 #' @export
 xgb.cv <- function(params=list(), data, nrounds, nfold, label = NULL, missing = NA,
                    prediction = FALSE, showsd = TRUE, metrics=list(),
-                   obj = NULL, feval = NULL, stratified = TRUE, folds = NULL,
+                   obj = NULL, feval = NULL, stratified = TRUE, folds = NULL, train_folds = NULL,
                    verbose = TRUE, print_every_n=1L,
                    early_stopping_rounds = NULL, maximize = NULL, callbacks = list(), ...) {
 
@@ -133,8 +138,15 @@ xgb.cv <- function(params=list(), data, nrounds, nfold, label = NULL, missing = 
 
   # Check the labels
   if ( (inherits(data, 'xgb.DMatrix') && is.null(getinfo(data, 'label'))) ||
-       (!inherits(data, 'xgb.DMatrix') && is.null(label)))
+       (!inherits(data, 'xgb.DMatrix') && is.null(label))) {
     stop("Labels must be provided for CV either through xgb.DMatrix, or through 'label=' when 'data' is matrix")
+  } else if (inherits(data, 'xgb.DMatrix')) {
+    if (!is.null(label))
+      warning("xgb.cv: label will be ignored, since data is of type xgb.DMatrix")
+    cv_label = getinfo(data, 'label')
+  } else {
+    cv_label = label
+  }
 
   # CV folds
   if(!is.null(folds)) {
@@ -144,7 +156,7 @@ xgb.cv <- function(params=list(), data, nrounds, nfold, label = NULL, missing = 
   } else {
     if (nfold <= 1)
       stop("'nfold' must be > 1")
-    folds <- generate.cv.folds(nfold, nrow(data), stratified, label, params)
+    folds <- generate.cv.folds(nfold, nrow(data), stratified, cv_label, params)
   }
 
   # Potential TODO: sequential CV
@@ -179,10 +191,15 @@ xgb.cv <- function(params=list(), data, nrounds, nfold, label = NULL, missing = 
 
 
   # create the booster-folds
+  # train_folds
   dall <- xgb.get.DMatrix(data, label, missing)
   bst_folds <- lapply(seq_along(folds), function(k) {
     dtest  <- slice(dall, folds[[k]])
-    dtrain <- slice(dall, unlist(folds[-k]))
+    # code originally contributed by @RolandASc on stackoverflow
+    if(is.null(train_folds))
+       dtrain <- slice(dall, unlist(folds[-k]))
+    else
+       dtrain <- slice(dall, train_folds[[k]])
     handle <- xgb.Booster.handle(params, list(dtrain, dtest))
     list(dtrain = dtrain, bst = handle, watchlist = list(train = dtrain, test=dtest), index = folds[[k]])
   })

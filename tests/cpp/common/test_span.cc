@@ -4,7 +4,7 @@
 #include <gtest/gtest.h>
 #include <vector>
 
-#include "../../../src/common/span.h"
+#include <xgboost/span.h>
 #include "test_span.h"
 
 namespace xgboost {
@@ -98,7 +98,8 @@ TEST(Span, FromPtrLen) {
   }
 
   {
-    EXPECT_ANY_THROW(Span<float> tmp (arr, -1););
+    auto lazy = [=]() {Span<float const, 16> tmp (arr, 5);};
+    EXPECT_DEATH(lazy(), "\\[xgboost\\] Condition .* failed.\n");
   }
 
   // dynamic extent
@@ -285,17 +286,43 @@ TEST(Span, ElementAccess) {
     ++j;
   }
 
-  EXPECT_ANY_THROW(s[16]);
-  EXPECT_ANY_THROW(s[-1]);
+  EXPECT_DEATH(s[16], "\\[xgboost\\] Condition .* failed.\n");
+  EXPECT_DEATH(s[-1], "\\[xgboost\\] Condition .* failed.\n");
 
-  EXPECT_ANY_THROW(s(16));
-  EXPECT_ANY_THROW(s(-1));
+  EXPECT_DEATH(s(16), "\\[xgboost\\] Condition .* failed.\n");
+  EXPECT_DEATH(s(-1), "\\[xgboost\\] Condition .* failed.\n");
 }
 
 TEST(Span, Obversers) {
   int status = 1;
   TestObservers{&status}();
   ASSERT_EQ(status, 1);
+}
+
+TEST(Span, FrontBack) {
+  {
+    float arr[4] {0, 1, 2, 3};
+    Span<float, 4> s(arr);
+    ASSERT_EQ(s.front(), 0);
+    ASSERT_EQ(s.back(), 3);
+  }
+  {
+    std::vector<double> arr {0, 1, 2, 3};
+    Span<double> s(arr);
+    ASSERT_EQ(s.front(), 0);
+    ASSERT_EQ(s.back(), 3);
+  }
+
+  {
+    Span<float, 0> s;
+    EXPECT_DEATH(s.front(), "\\[xgboost\\] Condition .* failed.\n");
+    EXPECT_DEATH(s.back(), "\\[xgboost\\] Condition .* failed.\n");
+  }
+  {
+    Span<float> s;
+    EXPECT_DEATH(s.front(), "\\[xgboost\\] Condition .* failed.\n");
+    EXPECT_DEATH(s.back(), "\\[xgboost\\] Condition .* failed.\n");
+  }
 }
 
 TEST(Span, FirstLast) {
@@ -313,10 +340,10 @@ TEST(Span, FirstLast) {
     for (size_t i = 0; i < first.size(); ++i) {
       ASSERT_EQ(first[i], arr[i]);
     }
-
-    EXPECT_ANY_THROW(s.first<-1>());
-    EXPECT_ANY_THROW(s.first<17>());
-    EXPECT_ANY_THROW(s.first<32>());
+    auto constexpr kOne = static_cast<Span<float, 4>::index_type>(-1);
+    EXPECT_DEATH(s.first<kOne>(), "\\[xgboost\\] Condition .* failed.\n");
+    EXPECT_DEATH(s.first<17>(), "\\[xgboost\\] Condition .* failed.\n");
+    EXPECT_DEATH(s.first<32>(), "\\[xgboost\\] Condition .* failed.\n");
   }
 
   {
@@ -332,10 +359,10 @@ TEST(Span, FirstLast) {
     for (size_t i = 0; i < last.size(); ++i) {
       ASSERT_EQ(last[i], arr[i+12]);
     }
-
-    EXPECT_ANY_THROW(s.last<-1>());
-    EXPECT_ANY_THROW(s.last<17>());
-    EXPECT_ANY_THROW(s.last<32>());
+    auto constexpr kOne = static_cast<Span<float, 4>::index_type>(-1);
+    EXPECT_DEATH(s.last<kOne>(), "\\[xgboost\\] Condition .* failed.\n");
+    EXPECT_DEATH(s.last<17>(), "\\[xgboost\\] Condition .* failed.\n");
+    EXPECT_DEATH(s.last<32>(), "\\[xgboost\\] Condition .* failed.\n");
   }
 
   // dynamic extent
@@ -352,9 +379,9 @@ TEST(Span, FirstLast) {
       ASSERT_EQ(first[i], s[i]);
     }
 
-    EXPECT_ANY_THROW(s.first(-1));
-    EXPECT_ANY_THROW(s.first(17));
-    EXPECT_ANY_THROW(s.first(32));
+    EXPECT_DEATH(s.first(-1), "\\[xgboost\\] Condition .* failed.\n");
+    EXPECT_DEATH(s.first(17), "\\[xgboost\\] Condition .* failed.\n");
+    EXPECT_DEATH(s.first(32), "\\[xgboost\\] Condition .* failed.\n");
 
     delete [] arr;
   }
@@ -372,9 +399,9 @@ TEST(Span, FirstLast) {
       ASSERT_EQ(s[12 + i], last[i]);
     }
 
-    EXPECT_ANY_THROW(s.last(-1));
-    EXPECT_ANY_THROW(s.last(17));
-    EXPECT_ANY_THROW(s.last(32));
+    EXPECT_DEATH(s.last(-1), "\\[xgboost\\] Condition .* failed.\n");
+    EXPECT_DEATH(s.last(17), "\\[xgboost\\] Condition .* failed.\n");
+    EXPECT_DEATH(s.last(32), "\\[xgboost\\] Condition .* failed.\n");
 
     delete [] arr;
   }
@@ -394,11 +421,12 @@ TEST(Span, Subspan) {
   ASSERT_EQ(s1.data() + 2, s4.data());
   ASSERT_EQ(s4.size(), s1.size() - 2);
 
-  EXPECT_ANY_THROW(s1.subspan(-1, 0));
-  EXPECT_ANY_THROW(s1.subspan(16, 0));
+  EXPECT_DEATH(s1.subspan(-1, 0), "\\[xgboost\\] Condition .* failed.\n");
+  EXPECT_DEATH(s1.subspan(16, 0), "\\[xgboost\\] Condition .* failed.\n");
 
-  EXPECT_ANY_THROW(s1.subspan<-1>());
-  EXPECT_ANY_THROW(s1.subspan<16>());
+  auto constexpr kOne = static_cast<Span<int, 4>::index_type>(-1);
+  EXPECT_DEATH(s1.subspan<kOne>(), "\\[xgboost\\] Condition .* failed.\n");
+  EXPECT_DEATH(s1.subspan<16>(), "\\[xgboost\\] Condition .* failed.\n");
 }
 
 TEST(Span, Compare) {

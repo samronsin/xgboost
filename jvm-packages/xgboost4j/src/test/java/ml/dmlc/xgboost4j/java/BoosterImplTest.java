@@ -126,11 +126,10 @@ public class BoosterImplTest {
 
     Booster booster = trainBooster(trainMat, testMat);
 
-    Path tempDir = Files.createTempDirectory("boosterTest-");
-    File tempFile = Files.createTempFile("", "").toFile();
-    booster.saveModel(new FileOutputStream(tempFile));
+    ByteArrayOutputStream output = new ByteArrayOutputStream();
+    booster.saveModel(output);
     IEvaluation eval = new EvalError();
-    Booster loadedBooster = XGBoost.loadModel(new FileInputStream(tempFile));
+    Booster loadedBooster = XGBoost.loadModel(new ByteArrayInputStream(output.toByteArray()));
     float originalPredictError = eval.eval(booster.predict(testMat, true), testMat);
     TestCase.assertTrue("originalPredictErr:" + originalPredictError,
             originalPredictError < 0.1f);
@@ -616,5 +615,35 @@ public class BoosterImplTest {
     float booster2error = eval.eval(booster2.predict(testMat, true, 0), testMat);
     TestCase.assertTrue(booster1error == booster2error);
     TestCase.assertTrue(tempBoosterError > booster2error);
+  }
+
+  /**
+   * test set/get attributes to/from a booster
+   *
+   * @throws XGBoostError
+   */
+  @Test
+  public void testSetAndGetAttrs() throws XGBoostError {
+    DMatrix trainMat = new DMatrix("../../demo/data/agaricus.txt.train");
+    DMatrix testMat = new DMatrix("../../demo/data/agaricus.txt.test");
+
+    Booster booster = trainBooster(trainMat, testMat);
+    booster.setAttr("testKey1", "testValue1");
+    TestCase.assertEquals(booster.getAttr("testKey1"), "testValue1");
+    booster.setAttr("testKey1", "testValue2");
+    TestCase.assertEquals(booster.getAttr("testKey1"), "testValue2");
+
+    booster.setAttrs(new HashMap<String, String>(){{
+      put("aa", "AA");
+      put("bb", "BB");
+      put("cc", "CC");
+    }});
+
+    Map<String, String> attr = booster.getAttrs();
+    TestCase.assertEquals(attr.size(), 4);
+    TestCase.assertEquals(attr.get("testKey1"), "testValue2");
+    TestCase.assertEquals(attr.get("aa"), "AA");
+    TestCase.assertEquals(attr.get("bb"), "BB");
+    TestCase.assertEquals(attr.get("cc"), "CC");
   }
 }

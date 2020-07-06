@@ -10,7 +10,7 @@ data(agaricus.test, package='xgboost')
 dtrain <- xgb.DMatrix(data = agaricus.train$data, label = agaricus.train$label)
 dtest <- xgb.DMatrix(data = agaricus.test$data, label = agaricus.test$label)
 
-param <- list(max_depth=2, eta=1, silent=1, objective='binary:logistic')
+param <- list(max_depth=2, eta=1, objective='binary:logistic')
 nrounds = 4
 
 # training the model for two rounds
@@ -38,6 +38,7 @@ create.new.tree.features <- function(model, original.features){
 # Convert previous features to one hot encoding
 new.features.train <- create.new.tree.features(bst, agaricus.train$data)
 new.features.test <- create.new.tree.features(bst, agaricus.test$data)
+colnames(new.features.test) <- colnames(new.features.train)
 
 # learning with new features
 new.dtrain <- xgb.DMatrix(data = new.features.train, label = agaricus.train$label)

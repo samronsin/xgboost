@@ -14,6 +14,9 @@ Core Data Structure
     :members:
     :show-inheritance:
 
+.. autoclass:: xgboost.DeviceQuantileDMatrix
+    :show-inheritance:
+
 .. autoclass:: xgboost.Booster
     :members:
     :show-inheritance:
@@ -43,6 +46,14 @@ Scikit-Learn API
     :members:
     :inherited-members:
     :show-inheritance:
+.. autoclass:: xgboost.XGBRFRegressor
+    :members:
+    :inherited-members:
+    :show-inheritance:
+.. autoclass:: xgboost.XGBRFClassifier
+    :members:
+    :inherited-members:
+    :show-inheritance:
 
 Plotting API
 ------------
@@ -65,3 +76,19 @@ Callback API
 .. autofunction:: xgboost.callback.reset_learning_rate
 
 .. autofunction:: xgboost.callback.early_stop
+
+.. _dask_api:
+
+Dask API
+--------
+.. automodule:: xgboost.dask
+
+.. autofunction:: xgboost.dask.DaskDMatrix
+
+.. autofunction:: xgboost.dask.train
+
+.. autofunction:: xgboost.dask.predict
+
+.. autofunction:: xgboost.dask.DaskXGBClassifier
+
+.. autofunction:: xgboost.dask.DaskXGBRegressor

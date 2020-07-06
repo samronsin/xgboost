@@ -83,10 +83,19 @@ if __name__ == "__main__":
                 maybe_generator = ' -G"Visual Studio 14 Win64"'
             else:
                 maybe_generator = ""
+            if sys.platform == "linux":
+                maybe_parallel_build = " -- -j $(nproc)"
+            else:
+                maybe_parallel_build = ""
 
             args = ["-D{0}:BOOL={1}".format(k, v) for k, v in CONFIG.items()]
+
+            # if enviorment set rabit_mock
+            if os.getenv("RABIT_MOCK", None) is not None:
+                args.append("-DRABIT_MOCK:BOOL=ON")
+
             run("cmake .. " + " ".join(args) + maybe_generator)
-            run("cmake --build . --config Release")
+            run("cmake --build . --config Release" + maybe_parallel_build)
 
         with cd("demo/regression"):
             run(sys.executable + " mapfeat.py")
@@ -115,3 +124,7 @@ if __name__ == "__main__":
         cp(file, "xgboost4j-spark/src/test/resources")
     for file in glob.glob("../demo/data/agaricus.*"):
         cp(file, "xgboost4j-spark/src/test/resources")
+
+    maybe_makedirs("xgboost4j/src/test/resources")
+    for file in glob.glob("../demo/data/agaricus.*"):
+        cp(file, "xgboost4j/src/test/resources")

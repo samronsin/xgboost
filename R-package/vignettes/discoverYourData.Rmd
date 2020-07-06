@@ -63,7 +63,7 @@ The first step is to load `Arthritis` dataset in memory and wrap it with `data.t
 
 ```{r, results='hide'}
 data(Arthritis)
-df <- data.table(Arthritis, keep.rownames = F)
+df <- data.table(Arthritis, keep.rownames = FALSE)
 ```
 
 > `data.table` is 100% compliant with **R** `data.frame` but its syntax is more consistent and its performance for large dataset is [best in class](http://stackoverflow.com/questions/21435339/data-table-vs-dplyr-can-one-do-something-well-the-other-cant-or-does-poorly) (`dplyr` from **R** and `Pandas` from **Python** [included](https://github.com/Rdatatable/data.table/wiki/Benchmarks-%3A-Grouping)). Some parts of **Xgboost** **R** package use `data.table`.
@@ -138,7 +138,7 @@ levels(df[,Treatment])
 
 Next step, we will transform the categorical data to dummy variables.
 Several encoding methods exist, e.g., [one-hot encoding](http://en.wikipedia.org/wiki/One-hot) is a common approach.
-We will use the [dummy contrast coding](http://www.ats.ucla.edu/stat/r/library/contrast_coding.htm#dummy) which is popular because it producess "full rank" encoding (also see [this blog post by Max Kuhn](http://appliedpredictivemodeling.com/blog/2013/10/23/the-basics-of-encoding-categorical-data-for-predictive-models)).
+We will use the [dummy contrast coding](http://www.ats.ucla.edu/stat/r/library/contrast_coding.htm#dummy) which is popular because it produces "full rank" encoding (also see [this blog post by Max Kuhn](http://appliedpredictivemodeling.com/blog/2013/10/23/the-basics-of-encoding-categorical-data-for-predictive-models)).
 
 The purpose is to transform each value of each *categorical* feature into a *binary* feature `{0, 1}`.
 
@@ -268,7 +268,7 @@ c2 <- chisq.test(df$Age, output_vector)
 print(c2)
 ```
 
-Pearson correlation between Age and illness disapearing is **`r round(c2$statistic, 2 )`**.
+Pearson correlation between Age and illness disappearing is **`r round(c2$statistic, 2 )`**.
 
 ```{r, warning=FALSE, message=FALSE}
 c2 <- chisq.test(df$AgeDiscret, output_vector)

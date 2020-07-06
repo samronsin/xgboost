@@ -17,7 +17,7 @@
 *.tar.gz
 *conf
 *buffer
-*model
+*.model
 *pyc
 *.train
 *.test
@@ -51,6 +51,7 @@ Debug
 #.Rbuildignore
 R-package.Rproj
 *.cache*
+.mypy_cache/
 # java
 java/xgboost4j/target
 java/xgboost4j/tmp
@@ -65,14 +66,11 @@ nb-configuration*
 .pydevproject
 .settings/
 build
-config.mk
 /xgboost
 *.data
 build_plugin
-.idea
 recommonmark/
 tags
-*.iml
 *.class
 target
 *.swp
@@ -90,5 +88,20 @@ lib/
 # spark
 metastore_db
 
-plugin/updater_gpu/test/cpp/data
 /include/xgboost/build_config.h
+
+# files from R-package source install
+**/config.status
+R-package/src/Makevars
+*.lib
+
+# Visual Studio Code
+/.vscode/
+
+# IntelliJ/CLion
+.idea
+*.iml
+/cmake-build-debug/
+
+# GDB
+.gdb_history

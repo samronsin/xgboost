@@ -24,7 +24,7 @@ Python
   dtrain = xgb.DMatrix('demo/data/agaricus.txt.train')
   dtest = xgb.DMatrix('demo/data/agaricus.txt.test')
   # specify parameters via map
-  param = {'max_depth':2, 'eta':1, 'silent':1, 'objective':'binary:logistic' }
+  param = {'max_depth':2, 'eta':1, 'objective':'binary:logistic' }
   num_round = 2
   bst = xgb.train(param, dtrain, num_round)
   # make prediction
@@ -71,7 +71,7 @@ Scala
 
   import ml.dmlc.xgboost4j.scala.DMatrix
   import ml.dmlc.xgboost4j.scala.XGBoost
-  
+
   object XGBoostScalaExample {
     def main(args: Array[String]) {
       // read trainining data, available at xgboost/demo/data

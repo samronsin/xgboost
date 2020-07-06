@@ -1,5 +1,5 @@
 /*!
- * Copyright (c) 2015 by Contributors
+ * Copyright (c) 2015~2020 by Contributors
  * \file c_api.h
  * \author Tianqi Chen
  * \brief C API of XGBoost, used for interfacing to other languages.
@@ -17,73 +17,30 @@
 #include <stdint.h>
 #endif  // __cplusplus
 
-// XGBoost C API will include APIs in Rabit C API
-#include <rabit/c_api.h>
-
 #if defined(_MSC_VER) || defined(_WIN32)
 #define XGB_DLL XGB_EXTERN_C __declspec(dllexport)
 #else
-#define XGB_DLL XGB_EXTERN_C
+#define XGB_DLL XGB_EXTERN_C __attribute__ ((visibility ("default")))
 #endif  // defined(_MSC_VER) || defined(_WIN32)
 
 // manually define unsigned long
 typedef uint64_t bst_ulong;  // NOLINT(*)
 
-
 /*! \brief handle to DMatrix */
 typedef void *DMatrixHandle;  // NOLINT(*)
 /*! \brief handle to Booster */
 typedef void *BoosterHandle;  // NOLINT(*)
-/*! \brief handle to a data iterator */
-typedef void *DataIterHandle;  // NOLINT(*)
-/*! \brief handle to a internal data holder. */
-typedef void *DataHolderHandle;  // NOLINT(*)
-
-/*! \brief Mini batch used in XGBoost Data Iteration */
-typedef struct {  // NOLINT(*)
-  /*! \brief number of rows in the minibatch */
-  size_t size;
-  /*! \brief row pointer to the rows in the data */
-#ifdef __APPLE__
-  /* Necessary as Java on MacOS defines jlong as long int
-   * and gcc defines int64_t as long long int. */
-  long* offset; // NOLINT(*)
-#else
-  int64_t* offset;  // NOLINT(*)
-#endif  // __APPLE__
-  /*! \brief labels of each instance */
-  float* label;
-  /*! \brief weight of each instance, can be NULL */
-  float* weight;
-  /*! \brief feature index */
-  int* index;
-  /*! \brief feature values */
-  float* value;
-} XGBoostBatchCSR;
-
 
 /*!
- * \brief Callback to set the data to handle,
- * \param handle The handle to the callback.
- * \param batch The data content to be set.
- */
-XGB_EXTERN_C typedef int XGBCallbackSetData(  // NOLINT(*)
-    DataHolderHandle handle, XGBoostBatchCSR batch);
-
-/*!
- * \brief The data reading callback function.
- *  The iterator will be able to give subset of batch in the data.
+ * \brief Return the version of the XGBoost library being currently used.
  *
- *  If there is data, the function will call set_function to set the data.
+ *  The output variable is only written if it's not NULL.
  *
- * \param data_handle The handle to the callback.
- * \param set_function The batch returned by the iterator
- * \param set_function_handle The handle to be passed to set function.
- * \return 0 if we are reaching the end and batch is not returned.
+ * \param major Store the major version number
+ * \param minor Store the minor version number
+ * \param patch Store the patch (revision) number
  */
-XGB_EXTERN_C typedef int XGBCallbackDataIterNext(  // NOLINT(*)
-    DataIterHandle data_handle, XGBCallbackSetData *set_function,
-    DataHolderHandle set_function_handle);
+XGB_DLL void XGBoostVersion(int* major, int* minor, int* patch);
 
 /*!
  * \brief get string message of the last error
@@ -116,20 +73,6 @@ XGB_DLL int XGBRegisterLogCallback(void (*callback)(const char*));
 XGB_DLL int XGDMatrixCreateFromFile(const char *fname,
                                     int silent,
                                     DMatrixHandle *out);
-
-/*!
- * \brief Create a DMatrix from a data iterator.
- * \param data_handle The handle to the data.
- * \param callback The callback to get the data.
- * \param cache_info Additional information about cache file, can be null.
- * \param out The created DMatrix
- * \return 0 when success, -1 when failure happens.
- */
-XGB_DLL int XGDMatrixCreateFromDataIter(
-    DataIterHandle data_handle,
-    XGBCallbackDataIterNext* callback,
-    const char* cache_info,
-    DMatrixHandle *out);
 
 /*!
  * \brief create a matrix content from CSR format
@@ -212,6 +155,189 @@ XGB_DLL int XGDMatrixCreateFromDT(void** data,
                                   bst_ulong ncol,
                                   DMatrixHandle* out,
                                   int nthread);
+
+/*
+ * ========================== Begin data callback APIs =========================
+ *
+ * Short notes for data callback
+ *
+ * There are 2 sets of data callbacks for DMatrix.  The first one is currently exclusively
+ * used by JVM packages.  It uses `XGBoostBatchCSR` to accept batches for CSR formated
+ * input, and concatenate them into 1 final big CSR.  The related functions are:
+ *
+ * - XGBCallbackSetData
+ * - XGBCallbackDataIterNext
+ * - XGDMatrixCreateFromDataIter
+ *
+ * Another set is used by Quantile based DMatrix (used by hist algorithm) for reducing
+ * memory usage.  Currently only GPU implementation is available.  It accept foreign data
+ * iterators as callbacks and works similar to external memory.  For GPU Hist, the data is
+ * first compressed by quantile sketching then merged.  This is particular useful for
+ * distributed setting as it eliminates 2 copies of data.  1 by a `concat` from external
+ * library to make the data into a blob for normal DMatrix initialization, another by the
+ * internal CSR copy of DMatrix.  Related functions are:
+ *
+ * - XGProxyDMatrixCreate
+ * - XGDMatrixCallbackNext
+ * - DataIterResetCallback
+ * - XGDeviceQuantileDMatrixSetDataCudaArrayInterface
+ * - XGDeviceQuantileDMatrixSetDataCudaColumnar
+ * - ... (data setters)
+ */
+
+/*  ==== First set of callback functions, used exclusively by JVM packages. ==== */
+
+/*! \brief handle to a external data iterator */
+typedef void *DataIterHandle;  // NOLINT(*)
+/*! \brief handle to a internal data holder. */
+typedef void *DataHolderHandle;  // NOLINT(*)
+
+
+/*! \brief Mini batch used in XGBoost Data Iteration */
+typedef struct {  // NOLINT(*)
+  /*! \brief number of rows in the minibatch */
+  size_t size;
+  /* \brief number of columns in the minibatch. */
+  size_t columns;
+  /*! \brief row pointer to the rows in the data */
+#ifdef __APPLE__
+  /* Necessary as Java on MacOS defines jlong as long int
+   * and gcc defines int64_t as long long int. */
+  long* offset; // NOLINT(*)
+#else
+  int64_t* offset;  // NOLINT(*)
+#endif  // __APPLE__
+  /*! \brief labels of each instance */
+  float* label;
+  /*! \brief weight of each instance, can be NULL */
+  float* weight;
+  /*! \brief feature index */
+  int* index;
+  /*! \brief feature values */
+  float* value;
+} XGBoostBatchCSR;
+
+/*!
+ * \brief Callback to set the data to handle,
+ * \param handle The handle to the callback.
+ * \param batch The data content to be set.
+ */
+XGB_EXTERN_C typedef int XGBCallbackSetData(  // NOLINT(*)
+    DataHolderHandle handle, XGBoostBatchCSR batch);
+
+/*!
+ * \brief The data reading callback function.
+ *  The iterator will be able to give subset of batch in the data.
+ *
+ *  If there is data, the function will call set_function to set the data.
+ *
+ * \param data_handle The handle to the callback.
+ * \param set_function The batch returned by the iterator
+ * \param set_function_handle The handle to be passed to set function.
+ * \return 0 if we are reaching the end and batch is not returned.
+ */
+XGB_EXTERN_C typedef int XGBCallbackDataIterNext(  // NOLINT(*)
+    DataIterHandle data_handle, XGBCallbackSetData *set_function,
+    DataHolderHandle set_function_handle);
+
+/*!
+ * \brief Create a DMatrix from a data iterator.
+ * \param data_handle The handle to the data.
+ * \param callback The callback to get the data.
+ * \param cache_info Additional information about cache file, can be null.
+ * \param out The created DMatrix
+ * \return 0 when success, -1 when failure happens.
+ */
+XGB_DLL int XGDMatrixCreateFromDataIter(
+    DataIterHandle data_handle,
+    XGBCallbackDataIterNext* callback,
+    const char* cache_info,
+    DMatrixHandle *out);
+
+/*  == Second set of callback functions, used by constructing Quantile based DMatrix. ===
+ *
+ * Short note for how to use the second set of callback for GPU Hist tree method.
+ *
+ * Step 0: Define a data iterator with 2 methods `reset`, and `next`.
+ * Step 1: Create a DMatrix proxy by `XGProxyDMatrixCreate` and hold the handle.
+ * Step 2: Pass the iterator handle, proxy handle and 2 methods into
+ *         `XGDeviceQuantileDMatrixCreateFromCallback`.
+ * Step 3: Call appropriate data setters in `next` functions.
+ *
+ * See test_iterative_device_dmatrix.cu or Python interface for examples.
+ */
+
+/*!
+ * \brief Create a DMatrix proxy for setting data, can be free by XGDMatrixFree.
+ *
+ * \param out      The created Device Quantile DMatrix
+ *
+ * \return 0 when success, -1 when failure happens
+ */
+XGB_DLL int XGProxyDMatrixCreate(DMatrixHandle* out);
+
+/*!
+ * \brief Callback function prototype for getting next batch of data.
+ *
+ * \param iter  A handler to the user defined iterator.
+ *
+ * \return 0 when success, -1 when failure happens
+ */
+XGB_EXTERN_C typedef int XGDMatrixCallbackNext(DataIterHandle iter);  // NOLINT(*)
+
+/*!
+ * \brief Callback function prototype for reseting external iterator
+ */
+XGB_EXTERN_C typedef void DataIterResetCallback(DataIterHandle handle); // NOLINT(*)
+
+/*!
+ * \brief Create a device DMatrix with data iterator.
+ *
+ * \param iter     A handle to external data iterator.
+ * \param proxy    A DMatrix proxy handle created by `XGProxyDMatrixCreate`.
+ * \param reset    Callback function reseting the iterator state.
+ * \param next     Callback function yieling the next batch of data.
+ * \param missing  Which value to represent missing value
+ * \param nthread  Number of threads to use, 0 for default.
+ * \param max_bin  Maximum number of bins for building histogram.
+ * \param out      The created Device Quantile DMatrix
+ *
+ * \return 0 when success, -1 when failure happens
+ */
+XGB_DLL int XGDeviceQuantileDMatrixCreateFromCallback(
+    DataIterHandle iter, DMatrixHandle proxy, DataIterResetCallback *reset,
+    XGDMatrixCallbackNext *next, float missing, int nthread, int max_bin,
+    DMatrixHandle *out);
+/*!
+ * \brief Set data on a DMatrix proxy.
+ *
+ * \param handle          A DMatrix proxy created by XGProxyDMatrixCreate
+ * \param c_interface_str Null terminated JSON document string representation of CUDA
+ *                        array interface.
+ *
+ * \return 0 when success, -1 when failure happens
+ */
+XGB_DLL int XGDeviceQuantileDMatrixSetDataCudaArrayInterface(
+    DMatrixHandle handle,
+    const char* c_interface_str);
+/*!
+ * \brief Set data on a DMatrix proxy.
+ *
+ * \param handle          A DMatrix proxy created by XGProxyDMatrixCreate
+ * \param c_interface_str Null terminated JSON document string representation of CUDA
+ *                        array interface, with an array of columns.
+ *
+ * \return 0 when success, -1 when failure happens
+ */
+XGB_DLL int XGDeviceQuantileDMatrixSetDataCudaColumnar(
+    DMatrixHandle handle,
+    const char* c_interface_str);
+/*
+ * ==========================- End data callback APIs ==========================
+ */
+
+
+
 /*!
  * \brief create a new dmatrix from sliced content of existing matrix
  * \param handle instance of data matrix to be sliced
@@ -224,6 +350,20 @@ XGB_DLL int XGDMatrixSliceDMatrix(DMatrixHandle handle,
                                   const int *idxset,
                                   bst_ulong len,
                                   DMatrixHandle *out);
+/*!
+ * \brief create a new dmatrix from sliced content of existing matrix
+ * \param handle instance of data matrix to be sliced
+ * \param idxset index set
+ * \param len length of index set
+ * \param out a sliced new matrix
+ * \param allow_groups allow slicing of an array with groups
+ * \return 0 when success, -1 when failure happens
+ */
+XGB_DLL int XGDMatrixSliceDMatrixEx(DMatrixHandle handle,
+                                    const int *idxset,
+                                    bst_ulong len,
+                                    DMatrixHandle *out,
+                                    int allow_groups);
 /*!
  * \brief free space in data matrix
  * \return 0 when success, -1 when failure happens
@@ -238,6 +378,18 @@ XGB_DLL int XGDMatrixFree(DMatrixHandle handle);
  */
 XGB_DLL int XGDMatrixSaveBinary(DMatrixHandle handle,
                                 const char *fname, int silent);
+
+/*!
+ * \brief Set content in array interface to a content in info.
+ * \param handle a instance of data matrix
+ * \param field field name.
+ * \param c_interface_str JSON string representation of array interface.
+ * \return 0 when success, -1 when failure happens
+ */
+XGB_DLL int XGDMatrixSetInfoFromInterface(DMatrixHandle handle,
+                                          char const* field,
+                                          char const* c_interface_str);
+
 /*!
  * \brief set float vector to a content in info
  * \param handle a instance of data matrix
@@ -262,8 +414,9 @@ XGB_DLL int XGDMatrixSetUIntInfo(DMatrixHandle handle,
                                  const char *field,
                                  const unsigned *array,
                                  bst_ulong len);
+
 /*!
- * \brief set label of the training matrix
+ * \brief (deprecated) Use XGDMatrixSetUIntInfo instead. Set group of the training matrix
  * \param handle a instance of data matrix
  * \param group pointer to group size
  * \param len length of array
@@ -272,8 +425,9 @@ XGB_DLL int XGDMatrixSetUIntInfo(DMatrixHandle handle,
 XGB_DLL int XGDMatrixSetGroup(DMatrixHandle handle,
                               const unsigned *group,
                               bst_ulong len);
+
 /*!
- * \brief get float info vector from matrix
+ * \brief get float info vector from matrix.
  * \param handle a instance of data matrix
  * \param field field name
  * \param out_len used to set result length
@@ -393,6 +547,14 @@ XGB_DLL int XGBoosterEvalOneIter(BoosterHandle handle,
  *          4:output feature contributions to individual predictions
  * \param ntree_limit limit number of trees used for prediction, this is only valid for boosted trees
  *    when the parameter is set to 0, we will use all the trees
+ * \param training Whether the prediction function is used as part of a training loop.
+ *    Prediction can be run in 2 scenarios:
+ *    1. Given data matrix X, obtain prediction y_pred from the model.
+ *    2. Obtain the prediction for computing gradients. For example, DART booster performs dropout
+ *       during training, and the prediction result will be different from the one obtained by normal
+ *       inference step due to dropped trees.
+ *    Set training=false for the first scenario. Set training=true for the second scenario.
+ *    The second scenario applies when you are defining a custom objective function.
  * \param out_len used to store length of returning result
  * \param out_result used to set a pointer to array
  * \return 0 when success, -1 when failure happens
@@ -401,11 +563,34 @@ XGB_DLL int XGBoosterPredict(BoosterHandle handle,
                              DMatrixHandle dmat,
                              int option_mask,
                              unsigned ntree_limit,
+                             int training,
                              bst_ulong *out_len,
                              const float **out_result);
 
+/*
+ * ========================== Begin Serialization APIs =========================
+ */
+/*
+ * Short note for serialization APIs.  There are 3 different sets of serialization API.
+ *
+ * - Functions with the term "Model" handles saving/loading XGBoost model like trees or
+ *   linear weights.  Striping out parameters configuration like training algorithms or
+ *   CUDA device ID helps user to reuse the trained model for different tasks, examples
+ *   are prediction, training continuation or interpretation.
+ *
+ * - Functions with the term "Config" handles save/loading configuration.  It helps user
+ *   to study the internal of XGBoost.  Also user can use the load method for specifying
+ *   paramters in a structured way.  These functions are introduced in 1.0.0, and are not
+ *   yet stable.
+ *
+ * - Functions with the term "Serialization" are combined of above two.  They are used in
+ *   situations like check-pointing, or continuing training task in distributed
+ *   environment.  In these cases the task must be carried out without any user
+ *   intervention.
+ */
+
 /*!
- * \brief load model from existing file
+ * \brief Load model from existing file
  * \param handle handle
  * \param fname file name
 * \return 0 when success, -1 when failure happens
@@ -413,7 +598,7 @@ XGB_DLL int XGBoosterPredict(BoosterHandle handle,
 XGB_DLL int XGBoosterLoadModel(BoosterHandle handle,
                                const char *fname);
 /*!
- * \brief save model into existing file
+ * \brief Save model into existing file
  * \param handle handle
  * \param fname file name
  * \return 0 when success, -1 when failure happens
@@ -438,9 +623,80 @@ XGB_DLL int XGBoosterLoadModelFromBuffer(BoosterHandle handle,
  * \param out_dptr the argument to hold the output data pointer
  * \return 0 when success, -1 when failure happens
  */
-XGB_DLL int XGBoosterGetModelRaw(BoosterHandle handle,
-                                 bst_ulong *out_len,
+XGB_DLL int XGBoosterGetModelRaw(BoosterHandle handle, bst_ulong *out_len,
                                  const char **out_dptr);
+
+/*!
+ * \brief Memory snapshot based serialization method.  Saves everything states
+ * into buffer.
+ *
+ * \param handle handle
+ * \param out_len the argument to hold the output length
+ * \param out_dptr the argument to hold the output data pointer
+ * \return 0 when success, -1 when failure happens
+ */
+XGB_DLL int XGBoosterSerializeToBuffer(BoosterHandle handle, bst_ulong *out_len,
+                                       const char **out_dptr);
+/*!
+ * \brief Memory snapshot based serialization method.  Loads the buffer returned
+ *        from `XGBoosterSerializeToBuffer'.
+ *
+ * \param handle handle
+ * \param buf pointer to the buffer
+ * \param len the length of the buffer
+ * \return 0 when success, -1 when failure happens
+ */
+XGB_DLL int XGBoosterUnserializeFromBuffer(BoosterHandle handle,
+                                           const void *buf, bst_ulong len);
+
+/*!
+ * \brief Initialize the booster from rabit checkpoint.
+ *  This is used in distributed training API.
+ * \param handle handle
+ * \param version The output version of the model.
+ * \return 0 when success, -1 when failure happens
+ */
+XGB_DLL int XGBoosterLoadRabitCheckpoint(BoosterHandle handle,
+                                         int* version);
+
+/*!
+ * \brief Save the current checkpoint to rabit.
+ * \param handle handle
+ * \return 0 when success, -1 when failure happens
+ */
+XGB_DLL int XGBoosterSaveRabitCheckpoint(BoosterHandle handle);
+
+
+/*!
+ * \brief Save XGBoost's internal configuration into a JSON document.  Currently the
+ *        support is experimental, function signature may change in the future without
+ *        notice.
+ *
+ * \param handle handle to Booster object.
+ * \param out_len length of output string
+ * \param out_str A valid pointer to array of characters.  The characters array is
+ *                allocated and managed by XGBoost, while pointer to that array needs to
+ *                be managed by caller.
+ * \return 0 when success, -1 when failure happens
+ */
+XGB_DLL int XGBoosterSaveJsonConfig(BoosterHandle handle, bst_ulong *out_len,
+                                    char const **out_str);
+/*!
+ * \brief Load XGBoost's internal configuration from a JSON document.  Currently the
+ *        support is experimental, function signature may change in the future without
+ *        notice.
+ *
+ * \param handle handle to Booster object.
+ * \param json_parameters string representation of a JSON document.
+ * \return 0 when success, -1 when failure happens
+ */
+XGB_DLL int XGBoosterLoadJsonConfig(BoosterHandle handle,
+                                    char const *json_parameters);
+/*
+ * =========================== End Serialization APIs ==========================
+ */
+
+
 /*!
  * \brief dump model, return array of strings representing model dump
  * \param handle handle
@@ -547,25 +803,4 @@ XGB_DLL int XGBoosterSetAttr(BoosterHandle handle,
 XGB_DLL int XGBoosterGetAttrNames(BoosterHandle handle,
                                   bst_ulong* out_len,
                                   const char*** out);
-
-// --- Distributed training API----
-// NOTE: functions in rabit/c_api.h will be also available in libxgboost.so
-/*!
- * \brief Initialize the booster from rabit checkpoint.
- *  This is used in distributed training API.
- * \param handle handle
- * \param version The output version of the model.
- * \return 0 when success, -1 when failure happens
- */
-XGB_DLL int XGBoosterLoadRabitCheckpoint(
-    BoosterHandle handle,
-    int* version);
-
-/*!
- * \brief Save the current checkpoint to rabit.
- * \param handle handle
- * \return 0 when success, -1 when failure happens
- */
-XGB_DLL int XGBoosterSaveRabitCheckpoint(BoosterHandle handle);
-
 #endif  // XGBOOST_C_API_H_

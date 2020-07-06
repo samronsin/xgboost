@@ -1,14 +1,12 @@
 # coding: utf-8
 # pylint: disable= invalid-name
-
 """Distributed XGBoost Rabit related API."""
-from __future__ import absolute_import
 import sys
 import ctypes
+import pickle
 import numpy as np
 
 from .core import _LIB, c_str, STRING_TYPES
-from .compat import pickle
 
 
 def _init_rabit():
@@ -56,6 +54,12 @@ def get_world_size():
     """
     ret = _LIB.RabitGetWorldSize()
     return ret
+
+
+def is_distributed():
+    '''If rabit is distributed.'''
+    is_dist = _LIB.RabitIsDistributed()
+    return is_dist
 
 
 def tracker_print(msg):
@@ -143,6 +147,14 @@ DTYPE_ENUM__ = {
     np.dtype('float32'): 6,
     np.dtype('float64'): 7
 }
+
+
+class Op:                     # pylint: disable=too-few-public-methods
+    '''Supported operations for rabit.'''
+    MAX = 0
+    MIN = 1
+    SUM = 2
+    OR = 3
 
 
 def allreduce(data, op, prepare_fun=None):

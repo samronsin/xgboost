@@ -1,7 +1,6 @@
 # coding: utf-8
-# pylint: disable= invalid-name
+# pylint: disable=invalid-name, too-many-statements
 """Training Library containing training routines."""
-from __future__ import absolute_import
 
 from . import rabit
 from .core import EarlyStopException
@@ -19,14 +18,12 @@ def _get_callback_context(env):
 def _fmt_metric(value, show_stdv=True):
     """format metric string"""
     if len(value) == 2:
-        return '%s:%g' % (value[0], value[1])
-    elif len(value) == 3:
+        return '{0}:{1:.5f}'.format(value[0], value[1])
+    if len(value) == 3:
         if show_stdv:
-            return '%s:%g+%g' % (value[0], value[1], value[2])
-        else:
-            return '%s:%g' % (value[0], value[1])
-    else:
-        raise ValueError("wrong metric value")
+            return  '{0}:{1:.5f}+{2:.5f}'.format(value[0], value[1], value[2])
+        return '{0}:{1:.5f}'.format(value[0], value[1])
+    raise ValueError("wrong metric value")
 
 
 def print_evaluation(period=1, show_stdv=True):
@@ -50,10 +47,10 @@ def print_evaluation(period=1, show_stdv=True):
     """
     def callback(env):
         """internal function"""
-        if env.rank != 0 or len(env.evaluation_result_list) == 0 or period is False or period == 0:
+        if env.rank != 0 or (not env.evaluation_result_list) or period is False or period == 0:
             return
         i = env.iteration
-        if (i % period == 0 or i + 1 == env.begin_iteration or i + 1 == env.end_iteration):
+        if i % period == 0 or i + 1 == env.begin_iteration or i + 1 == env.end_iteration:
             msg = '\t'.join([_fmt_metric(x, show_stdv) for x in env.evaluation_result_list])
             rabit.tracker_print('[%d]\t%s\n' % (i, msg))
     return callback
@@ -89,7 +86,7 @@ def record_evaluation(eval_result):
 
     def callback(env):
         """internal function"""
-        if len(eval_result) == 0:
+        if not eval_result:
             init(env)
         for k, v in env.evaluation_result_list:
             pos = k.index('-')
@@ -136,14 +133,16 @@ def reset_learning_rate(learning_rates):
 
         if context == 'train':
             bst, i, n = env.model, env.iteration, env.end_iteration
-            bst.set_param('learning_rate', get_learning_rate(i, n, learning_rates))
+            bst.set_param(
+                'learning_rate', get_learning_rate(i, n, learning_rates))
         elif context == 'cv':
             i, n = env.iteration, env.end_iteration
             for cvpack in env.cvfolds:
                 bst = cvpack.bst
-                bst.set_param('learning_rate', get_learning_rate(i, n, learning_rates))
+                bst.set_param(
+                    'learning_rate', get_learning_rate(i, n, learning_rates))
 
-    callback.before_iteration = True
+    callback.before_iteration = False
     return callback
 
 
@@ -182,14 +181,14 @@ def early_stop(stopping_rounds, maximize=False, verbose=True):
         """internal function"""
         bst = env.model
 
-        if len(env.evaluation_result_list) == 0:
+        if not env.evaluation_result_list:
             raise ValueError('For early stopping you need at least one set in evals.')
         if len(env.evaluation_result_list) > 1 and verbose:
             msg = ("Multiple eval metrics have been passed: "
                    "'{0}' will be used for early stopping.\n\n")
             rabit.tracker_print(msg.format(env.evaluation_result_list[-1][0]))
         maximize_metrics = ('auc', 'aucpr', 'map', 'ndcg')
-        maximize_at_n_metrics = ('auc@', 'aucpr@' 'map@', 'ndcg@')
+        maximize_at_n_metrics = ('auc@', 'aucpr@', 'map@', 'ndcg@')
         maximize_score = maximize
         metric_label = env.evaluation_result_list[-1][0]
         metric = metric_label.split('-', 1)[-1]
@@ -210,6 +209,10 @@ def early_stop(stopping_rounds, maximize=False, verbose=True):
             state['best_score'] = float('-inf')
         else:
             state['best_score'] = float('inf')
+        msg = '[%d]\t%s' % (
+            env.iteration,
+            '\t'.join([_fmt_metric(x) for x in env.evaluation_result_list]))
+        state['best_msg'] = msg
 
         if bst is not None:
             if bst.attr('best_score') is not None:
@@ -224,9 +227,9 @@ def early_stop(stopping_rounds, maximize=False, verbose=True):
 
     def callback(env):
         """internal function"""
-        score = env.evaluation_result_list[-1][1]
-        if len(state) == 0:
+        if not state:
             init(env)
+        score = env.evaluation_result_list[-1][1]
         best_score = state['best_score']
         best_iteration = state['best_iteration']
         maximize_score = state['maximize_score']
