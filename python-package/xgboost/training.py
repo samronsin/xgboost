@@ -2,121 +2,116 @@
 # pylint: disable=too-many-locals, too-many-arguments, invalid-name
 # pylint: disable=too-many-branches, too-many-statements
 """Training Library containing training routines."""
+import warnings
+import copy
 import numpy as np
-from .core import Booster, STRING_TYPES, XGBoostError, CallbackEnv
-from .core import EarlyStopException
+from .core import Booster, XGBoostError, _get_booster_layer_trees
 from .compat import (SKLEARN_INSTALLED, XGBStratifiedKFold)
-from . import rabit
 from . import callback
+
+
+def _configure_deprecated_callbacks(
+        verbose_eval, early_stopping_rounds, maximize, start_iteration,
+        num_boost_round, feval, evals_result, callbacks, show_stdv, cvfolds):
+    link = 'https://xgboost.readthedocs.io/en/latest/python/callbacks.html'
+    warnings.warn(f'Old style callback is deprecated.  See: {link}', UserWarning)
+    # Most of legacy advanced options becomes callbacks
+    if early_stopping_rounds is not None:
+        callbacks.append(callback.early_stop(early_stopping_rounds,
+                                             maximize=maximize,
+                                             verbose=bool(verbose_eval)))
+    if isinstance(verbose_eval, bool) and verbose_eval:
+        callbacks.append(callback.print_evaluation(show_stdv=show_stdv))
+    else:
+        if isinstance(verbose_eval, int):
+            callbacks.append(callback.print_evaluation(verbose_eval,
+                                                       show_stdv=show_stdv))
+    if evals_result is not None:
+        callbacks.append(callback.record_evaluation(evals_result))
+    callbacks = callback.LegacyCallbacks(
+        callbacks, start_iteration, num_boost_round, feval, cvfolds=cvfolds)
+    return callbacks
+
+
+def _is_new_callback(callbacks):
+    return any(isinstance(c, callback.TrainingCallback)
+               for c in callbacks) or not callbacks
 
 
 def _train_internal(params, dtrain,
                     num_boost_round=10, evals=(),
                     obj=None, feval=None,
-                    xgb_model=None, callbacks=None):
+                    xgb_model=None, callbacks=None,
+                    evals_result=None, maximize=None,
+                    verbose_eval=None, early_stopping_rounds=None):
     """internal training function"""
-    callbacks = [] if callbacks is None else callbacks
+    callbacks = [] if callbacks is None else copy.copy(callbacks)
     evals = list(evals)
-    params = params.copy()
-    if isinstance(params, dict) \
-            and 'eval_metric' in params \
-            and isinstance(params['eval_metric'], list):
-        params = dict((k, v) for k, v in params.items())
-        eval_metrics = params['eval_metric']
-        params.pop("eval_metric", None)
-        params = list(params.items())
-        for eval_metric in eval_metrics:
-            params += [('eval_metric', eval_metric)]
 
     bst = Booster(params, [dtrain] + [d[0] for d in evals])
-    nboost = 0
-    num_parallel_tree = 1
 
     if xgb_model is not None:
         bst = Booster(params, [dtrain] + [d[0] for d in evals],
                       model_file=xgb_model)
-        nboost = len(bst.get_dump())
 
-    _params = dict(params) if isinstance(params, list) else params
+    start_iteration = 0
 
-    if 'num_parallel_tree' in _params and _params[
-            'num_parallel_tree'] is not None:
-        num_parallel_tree = _params['num_parallel_tree']
-        nboost //= num_parallel_tree
-    if 'num_class' in _params and _params['num_class'] is not None:
-        nboost //= _params['num_class']
+    is_new_callback = _is_new_callback(callbacks)
+    if is_new_callback:
+        assert all(isinstance(c, callback.TrainingCallback)
+                   for c in callbacks), "You can't mix new and old callback styles."
+        if verbose_eval:
+            verbose_eval = 1 if verbose_eval is True else verbose_eval
+            callbacks.append(callback.EvaluationMonitor(period=verbose_eval))
+        if early_stopping_rounds:
+            callbacks.append(callback.EarlyStopping(
+                rounds=early_stopping_rounds, maximize=maximize))
+        callbacks = callback.CallbackContainer(callbacks, metric=feval)
+    else:
+        callbacks = _configure_deprecated_callbacks(
+            verbose_eval, early_stopping_rounds, maximize, start_iteration,
+            num_boost_round, feval, evals_result, callbacks,
+            show_stdv=False, cvfolds=None)
 
-    # Distributed code: Load the checkpoint from rabit.
-    version = bst.load_rabit_checkpoint()
-    assert rabit.get_world_size() != 1 or version == 0
-    rank = rabit.get_rank()
-    start_iteration = int(version / 2)
-    nboost += start_iteration
-
-    callbacks_before_iter = [
-        cb for cb in callbacks
-        if cb.__dict__.get('before_iteration', False)]
-    callbacks_after_iter = [
-        cb for cb in callbacks
-        if not cb.__dict__.get('before_iteration', False)]
+    bst = callbacks.before_training(bst)
 
     for i in range(start_iteration, num_boost_round):
-        for cb in callbacks_before_iter:
-            cb(CallbackEnv(model=bst,
-                           cvfolds=None,
-                           iteration=i,
-                           begin_iteration=start_iteration,
-                           end_iteration=num_boost_round,
-                           rank=rank,
-                           evaluation_result_list=None))
-        # Distributed code: need to resume to this point.
-        # Skip the first update if it is a recovery step.
-        if version % 2 == 0:
-            bst.update(dtrain, i, obj)
-            bst.save_rabit_checkpoint()
-            version += 1
-
-        assert rabit.get_world_size() == 1 or version == rabit.version_number()
-
-        nboost += 1
-        evaluation_result_list = []
-        # check evaluation result.
-        if evals:
-            bst_eval_set = bst.eval_set(evals, i, feval)
-            if isinstance(bst_eval_set, STRING_TYPES):
-                msg = bst_eval_set
-            else:
-                msg = bst_eval_set.decode()
-            res = [x.split(':') for x in msg.split()]
-            evaluation_result_list = [(k, float(v)) for k, v in res[1:]]
-        try:
-            for cb in callbacks_after_iter:
-                cb(CallbackEnv(model=bst,
-                               cvfolds=None,
-                               iteration=i,
-                               begin_iteration=start_iteration,
-                               end_iteration=num_boost_round,
-                               rank=rank,
-                               evaluation_result_list=evaluation_result_list))
-        except EarlyStopException:
+        if callbacks.before_iteration(bst, i, dtrain, evals):
             break
-        # do checkpoint after evaluation, in case evaluation also updates booster.
-        bst.save_rabit_checkpoint()
-        version += 1
+        bst.update(dtrain, i, obj)
+        if callbacks.after_iteration(bst, i, dtrain, evals):
+            break
 
+    bst = callbacks.after_training(bst)
+
+    if evals_result is not None and is_new_callback:
+        evals_result.update(callbacks.history)
+
+    # These should be moved into callback functions `after_training`, but until old
+    # callbacks are removed, the train function is the only place for setting the
+    # attributes.
+    num_parallel_tree, _ = _get_booster_layer_trees(bst)
     if bst.attr('best_score') is not None:
         bst.best_score = float(bst.attr('best_score'))
         bst.best_iteration = int(bst.attr('best_iteration'))
+        # num_class is handled internally
+        bst.set_attr(
+            best_ntree_limit=str((bst.best_iteration + 1) * num_parallel_tree)
+        )
+        bst.best_ntree_limit = int(bst.attr("best_ntree_limit"))
     else:
-        bst.best_iteration = nboost - 1
-    bst.best_ntree_limit = (bst.best_iteration + 1) * num_parallel_tree
+        # Due to compatibility with version older than 1.4, these attributes are added
+        # to Python object even if early stopping is not used.
+        bst.best_iteration = bst.num_boosted_rounds() - 1
+        bst.best_ntree_limit = (bst.best_iteration + 1) * num_parallel_tree
 
-    # Copy to serialise and unserialise booster to reset state and free training memory
+    # Copy to serialise and unserialise booster to reset state and free
+    # training memory
     return bst.copy()
 
 
 def train(params, dtrain, num_boost_round=10, evals=(), obj=None, feval=None,
-          maximize=False, early_stopping_rounds=None, evals_result=None,
+          maximize=None, early_stopping_rounds=None, evals_result=None,
           verbose_eval=True, xgb_model=None, callbacks=None):
     # pylint: disable=too-many-statements,too-many-branches, attribute-defined-outside-init
     """Train a booster with given parameters.
@@ -142,15 +137,17 @@ def train(params, dtrain, num_boost_round=10, evals=(), obj=None, feval=None,
         Activates early stopping. Validation metric needs to improve at least once in
         every **early_stopping_rounds** round(s) to continue training.
         Requires at least one item in **evals**.
-        The method returns the model from the last iteration (not the best one).
-        If there's more than one item in **evals**, the last entry will be used
-        for early stopping.
+        The method returns the model from the last iteration (not the best one).  Use
+        custom callback or model slicing if the best model is desired.
+        If there's more than one item in **evals**, the last entry will be used for early
+        stopping.
         If there's more than one metric in the **eval_metric** parameter given in
         **params**, the last metric will be used for early stopping.
         If early stopping occurs, the model will have three additional fields:
-        ``bst.best_score``, ``bst.best_iteration`` and ``bst.best_ntree_limit``.
-        (Use ``bst.best_ntree_limit`` to get the correct value if
-        ``num_parallel_tree`` and/or ``num_class`` appears in the parameters)
+        ``bst.best_score``, ``bst.best_iteration`` and ``bst.best_ntree_limit``.  Use
+        ``bst.best_ntree_limit`` to get the correct value if ``num_parallel_tree`` and/or
+        ``num_class`` appears in the parameters.  ``best_ntree_limit`` is the result of
+        ``num_parallel_tree * best_iteration``.
     evals_result: dict
         This dictionary stores the evaluation results of all the items in watchlist.
 
@@ -183,33 +180,22 @@ def train(params, dtrain, num_boost_round=10, evals=(), obj=None, feval=None,
 
         .. code-block:: python
 
-            [xgb.callback.reset_learning_rate(custom_rates)]
+            [xgb.callback.LearningRateScheduler(custom_rates)]
 
     Returns
     -------
     Booster : a trained booster model
     """
-    callbacks = [] if callbacks is None else callbacks
-
-    # Most of legacy advanced options becomes callbacks
-    if isinstance(verbose_eval, bool) and verbose_eval:
-        callbacks.append(callback.print_evaluation())
-    else:
-        if isinstance(verbose_eval, int):
-            callbacks.append(callback.print_evaluation(verbose_eval))
-
-    if early_stopping_rounds is not None:
-        callbacks.append(callback.early_stop(early_stopping_rounds,
-                                             maximize=maximize,
-                                             verbose=bool(verbose_eval)))
-    if evals_result is not None:
-        callbacks.append(callback.record_evaluation(evals_result))
-
-    return _train_internal(params, dtrain,
-                           num_boost_round=num_boost_round,
-                           evals=evals,
-                           obj=obj, feval=feval,
-                           xgb_model=xgb_model, callbacks=callbacks)
+    bst = _train_internal(params, dtrain,
+                          num_boost_round=num_boost_round,
+                          evals=evals,
+                          obj=obj, feval=feval,
+                          xgb_model=xgb_model, callbacks=callbacks,
+                          verbose_eval=verbose_eval,
+                          evals_result=evals_result,
+                          maximize=maximize,
+                          early_stopping_rounds=early_stopping_rounds)
+    return bst
 
 
 class CVPack(object):
@@ -221,6 +207,11 @@ class CVPack(object):
         self.watchlist = [(dtrain, 'train'), (dtest, 'test')]
         self.bst = Booster(param, [dtrain, dtest])
 
+    def __getattr__(self, name):
+        def _inner(*args, **kwargs):
+            return getattr(self.bst, name)(*args, **kwargs)
+        return _inner
+
     def update(self, iteration, fobj):
         """"Update the boosters for one iteration"""
         self.bst.update(self.dtrain, iteration, fobj)
@@ -228,6 +219,49 @@ class CVPack(object):
     def eval(self, iteration, feval):
         """"Evaluate the CVPack for one iteration."""
         return self.bst.eval_set(self.watchlist, iteration, feval)
+
+
+class _PackedBooster:
+    def __init__(self, cvfolds) -> None:
+        self.cvfolds = cvfolds
+
+    def update(self, iteration, obj):
+        '''Iterate through folds for update'''
+        for fold in self.cvfolds:
+            fold.update(iteration, obj)
+
+    def eval(self, iteration, feval):
+        '''Iterate through folds for eval'''
+        result = [f.eval(iteration, feval) for f in self.cvfolds]
+        return result
+
+    def set_attr(self, **kwargs):
+        '''Iterate through folds for setting attributes'''
+        for f in self.cvfolds:
+            f.bst.set_attr(**kwargs)
+
+    def attr(self, key):
+        '''Redirect to booster attr.'''
+        return self.cvfolds[0].bst.attr(key)
+
+    def set_param(self, params, value=None):
+        """Iterate through folds for set_param"""
+        for f in self.cvfolds:
+            f.bst.set_param(params, value)
+
+    def num_boosted_rounds(self):
+        '''Number of boosted rounds.'''
+        return self.cvfolds[0].num_boosted_rounds()
+
+    @property
+    def best_iteration(self):
+        '''Get best_iteration'''
+        return int(self.cvfolds[0].bst.attr("best_iteration"))
+
+    @property
+    def best_score(self):
+        """Get best_score."""
+        return float(self.cvfolds[0].bst.attr("best_score"))
 
 
 def groups_to_rows(groups, boundaries):
@@ -334,40 +368,8 @@ def mknfold(dall, nfold, param, seed, evals=(), fpreproc=None, stratified=False,
     return ret
 
 
-def aggcv(rlist):
-    # pylint: disable=invalid-name
-    """
-    Aggregate cross-validation results.
-
-    If verbose_eval is true, progress is displayed in every call. If
-    verbose_eval is an integer, progress will only be displayed every
-    `verbose_eval` trees, tracked via trial.
-    """
-    cvmap = {}
-    idx = rlist[0].split()[0]
-    for line in rlist:
-        arr = line.split()
-        assert idx == arr[0]
-        for metric_idx, it in enumerate(arr[1:]):
-            if not isinstance(it, STRING_TYPES):
-                it = it.decode()
-            k, v = it.split(':')
-            if (metric_idx, k) not in cvmap:
-                cvmap[(metric_idx, k)] = []
-            cvmap[(metric_idx, k)].append(float(v))
-    msg = idx
-    results = []
-    for (metric_idx, k), v in sorted(cvmap.items(), key=lambda x: x[0][0]):
-        v = np.array(v)
-        if not isinstance(msg, STRING_TYPES):
-            msg = msg.decode()
-        mean, std = np.mean(v), np.std(v)
-        results.extend([(k, mean, std)])
-    return results
-
-
 def cv(params, dtrain, num_boost_round=10, nfold=3, stratified=False, folds=None,
-       metrics=(), obj=None, feval=None, maximize=False, early_stopping_rounds=None,
+       metrics=(), obj=None, feval=None, maximize=None, early_stopping_rounds=None,
        fpreproc=None, as_pandas=True, verbose_eval=None, show_stdv=True,
        seed=0, callbacks=None, shuffle=True):
     # pylint: disable = invalid-name
@@ -431,7 +433,7 @@ def cv(params, dtrain, num_boost_round=10, nfold=3, stratified=False, folds=None
 
         .. code-block:: python
 
-            [xgb.callback.reset_learning_rate(custom_rates)]
+            [xgb.callback.LearningRateScheduler(custom_rates)]
     shuffle : bool
         Shuffle data before creating folds.
 
@@ -467,37 +469,33 @@ def cv(params, dtrain, num_boost_round=10, nfold=3, stratified=False, folds=None
 
     # setup callbacks
     callbacks = [] if callbacks is None else callbacks
-    if early_stopping_rounds is not None:
-        callbacks.append(callback.early_stop(early_stopping_rounds,
-                                             maximize=maximize,
-                                             verbose=False))
-
-    if isinstance(verbose_eval, bool) and verbose_eval:
-        callbacks.append(callback.print_evaluation(show_stdv=show_stdv))
+    is_new_callback = _is_new_callback(callbacks)
+    if is_new_callback:
+        assert all(isinstance(c, callback.TrainingCallback)
+                   for c in callbacks), "You can't mix new and old callback styles."
+        if isinstance(verbose_eval, bool) and verbose_eval:
+            verbose_eval = 1 if verbose_eval is True else verbose_eval
+            callbacks.append(callback.EvaluationMonitor(period=verbose_eval,
+                                                        show_stdv=show_stdv))
+        if early_stopping_rounds:
+            callbacks.append(callback.EarlyStopping(
+                rounds=early_stopping_rounds, maximize=maximize))
+        callbacks = callback.CallbackContainer(callbacks, metric=feval, is_cv=True)
     else:
-        if isinstance(verbose_eval, int):
-            callbacks.append(callback.print_evaluation(verbose_eval, show_stdv=show_stdv))
-
-    callbacks_before_iter = [
-        cb for cb in callbacks if
-        cb.__dict__.get('before_iteration', False)]
-    callbacks_after_iter = [
-        cb for cb in callbacks if
-        not cb.__dict__.get('before_iteration', False)]
+        callbacks = _configure_deprecated_callbacks(
+            verbose_eval, early_stopping_rounds, maximize, 0,
+            num_boost_round, feval, None, callbacks,
+            show_stdv=show_stdv, cvfolds=cvfolds)
+    booster = _PackedBooster(cvfolds)
+    callbacks.before_training(booster)
 
     for i in range(num_boost_round):
-        for cb in callbacks_before_iter:
-            cb(CallbackEnv(model=None,
-                           cvfolds=cvfolds,
-                           iteration=i,
-                           begin_iteration=0,
-                           end_iteration=num_boost_round,
-                           rank=0,
-                           evaluation_result_list=None))
-        for fold in cvfolds:
-            fold.update(i, obj)
-        res = aggcv([f.eval(i, feval) for f in cvfolds])
+        if callbacks.before_iteration(booster, i, dtrain, None):
+            break
+        booster.update(i, obj)
 
+        should_break = callbacks.after_iteration(booster, i, dtrain, None)
+        res = callbacks.aggregated_cv
         for key, mean, std in res:
             if key + '-mean' not in results:
                 results[key + '-mean'] = []
@@ -505,18 +503,10 @@ def cv(params, dtrain, num_boost_round=10, nfold=3, stratified=False, folds=None
                 results[key + '-std'] = []
             results[key + '-mean'].append(mean)
             results[key + '-std'].append(std)
-        try:
-            for cb in callbacks_after_iter:
-                cb(CallbackEnv(model=None,
-                               cvfolds=cvfolds,
-                               iteration=i,
-                               begin_iteration=0,
-                               end_iteration=num_boost_round,
-                               rank=0,
-                               evaluation_result_list=res))
-        except EarlyStopException as e:
+
+        if should_break:
             for k in results:
-                results[k] = results[k][:(e.best_iteration + 1)]
+                results[k] = results[k][:(booster.best_iteration + 1)]
             break
     if as_pandas:
         try:
@@ -524,4 +514,7 @@ def cv(params, dtrain, num_boost_round=10, nfold=3, stratified=False, folds=None
             results = pd.DataFrame.from_dict(results)
         except ImportError:
             pass
+
+    callbacks.after_training(booster)
+
     return results

@@ -3,7 +3,7 @@
 #' \code{xgb.train} is an advanced interface for training an xgboost model.
 #' The \code{xgboost} function is a simpler wrapper for \code{xgb.train}.
 #'
-#' @param params the list of parameters. The complete list of parameters is 
+#' @param params the list of parameters. The complete list of parameters is
 #'   available in the \href{http://xgboost.readthedocs.io/en/latest/parameter.html}{online documentation}. Below
 #'   is a shorter summary:
 #'
@@ -15,7 +15,7 @@
 #'
 #' 2. Booster Parameters
 #'
-#' 2.1. Parameter for Tree Booster
+#' 2.1. Parameters for Tree Booster
 #'
 #' \itemize{
 #'   \item \code{eta} control the learning rate: scale the contribution of each tree by a factor of \code{0 < eta < 1} when it is added to the current approximation. Used to prevent overfitting by making the boosting process more conservative. Lower value for \code{eta} implies larger value for \code{nrounds}: low \code{eta} value means model more robust to overfitting but slower to compute. Default: 0.3
@@ -24,12 +24,14 @@
 #'   \item \code{min_child_weight} minimum sum of instance weight (hessian) needed in a child. If the tree partition step results in a leaf node with the sum of instance weight less than min_child_weight, then the building process will give up further partitioning. In linear regression mode, this simply corresponds to minimum number of instances needed to be in each node. The larger, the more conservative the algorithm will be. Default: 1
 #'   \item \code{subsample} subsample ratio of the training instance. Setting it to 0.5 means that xgboost randomly collected half of the data instances to grow trees and this will prevent overfitting. It makes computation shorter (because less data to analyse). It is advised to use this parameter with \code{eta} and increase \code{nrounds}. Default: 1
 #'   \item \code{colsample_bytree} subsample ratio of columns when constructing each tree. Default: 1
+#'   \item \code{lambda} L2 regularization term on weights. Default: 1
+#'   \item \code{alpha} L1 regularization term on weights. (there is no L1 reg on bias because it is not important). Default: 0
 #'   \item \code{num_parallel_tree} Experimental parameter. number of trees to grow per round. Useful to test Random Forest through Xgboost (set \code{colsample_bytree < 1}, \code{subsample  < 1}  and \code{round = 1}) accordingly. Default: 1
 #'   \item \code{monotone_constraints} A numerical vector consists of \code{1}, \code{0} and \code{-1} with its length equals to the number of features in the training data. \code{1} is increasing, \code{-1} is decreasing and \code{0} is no constraint.
 #'   \item \code{interaction_constraints} A list of vectors specifying feature indices of permitted interactions. Each item of the list represents one permitted interaction where specified features are allowed to interact with each other. Feature index values should start from \code{0} (\code{0} references the first column).  Leave argument unspecified for no interaction constraints.
 #' }
 #'
-#' 2.2. Parameter for Linear Booster
+#' 2.2. Parameters for Linear Booster
 #'
 #' \itemize{
 #'   \item \code{lambda} L2 regularization term on weights. Default: 0
@@ -130,16 +132,18 @@
 #' Note that when using a customized metric, only this single metric can be used.
 #' The following is the list of built-in metrics for which Xgboost provides optimized implementation:
 #'   \itemize{
-#'      \item \code{rmse} root mean square error. \url{http://en.wikipedia.org/wiki/Root_mean_square_error}
-#'      \item \code{logloss} negative log-likelihood. \url{http://en.wikipedia.org/wiki/Log-likelihood}
-#'      \item \code{mlogloss} multiclass logloss. \url{http://wiki.fast.ai/index.php/Log_Loss}
+#'      \item \code{rmse} root mean square error. \url{https://en.wikipedia.org/wiki/Root_mean_square_error}
+#'      \item \code{logloss} negative log-likelihood. \url{https://en.wikipedia.org/wiki/Log-likelihood}
+#'      \item \code{mlogloss} multiclass logloss. \url{https://scikit-learn.org/stable/modules/generated/sklearn.metrics.log_loss.html}
 #'      \item \code{error} Binary classification error rate. It is calculated as \code{(# wrong cases) / (# all cases)}.
 #'            By default, it uses the 0.5 threshold for predicted values to define negative and positive instances.
 #'            Different threshold (e.g., 0.) could be specified as "error@0."
 #'      \item \code{merror} Multiclass classification error rate. It is calculated as \code{(# wrong cases) / (# all cases)}.
-#'      \item \code{auc} Area under the curve. \url{http://en.wikipedia.org/wiki/Receiver_operating_characteristic#'Area_under_curve} for ranking evaluation.
+#'      \item \code{mae} Mean absolute error
+#'      \item \code{mape} Mean absolute percentage error
+#'      \item \code{auc} Area under the curve. \url{https://en.wikipedia.org/wiki/Receiver_operating_characteristic#'Area_under_curve} for ranking evaluation.
 #'      \item \code{aucpr} Area under the PR curve. \url{https://en.wikipedia.org/wiki/Precision_and_recall} for ranking evaluation.
-#'      \item \code{ndcg} Normalized Discounted Cumulative Gain (for ranking task). \url{http://en.wikipedia.org/wiki/NDCG}
+#'      \item \code{ndcg} Normalized Discounted Cumulative Gain (for ranking task). \url{https://en.wikipedia.org/wiki/NDCG}
 #'   }
 #'
 #' The following callbacks are automatically created when certain parameters are set:
@@ -191,8 +195,8 @@
 #' data(agaricus.train, package='xgboost')
 #' data(agaricus.test, package='xgboost')
 #'
-#' dtrain <- xgb.DMatrix(agaricus.train$data, label = agaricus.train$label)
-#' dtest <- xgb.DMatrix(agaricus.test$data, label = agaricus.test$label)
+#' dtrain <- with(agaricus.train, xgb.DMatrix(data, label = label))
+#' dtest <- with(agaricus.test, xgb.DMatrix(data, label = label))
 #' watchlist <- list(train = dtrain, eval = dtest)
 #'
 #' ## A simple xgb.train example:
@@ -278,7 +282,7 @@ xgb.train <- function(params = list(), data, nrounds, watchlist = list(),
 
   # evaluation printing callback
   params <- c(params)
-  print_every_n <- max( as.integer(print_every_n), 1L)
+  print_every_n <- max(as.integer(print_every_n), 1L)
   if (!has.callbacks(callbacks, 'cb.print.evaluation') &&
       verbose) {
     callbacks <- add.cb(callbacks, cb.print.evaluation(print_every_n))
@@ -328,11 +332,8 @@ xgb.train <- function(params = list(), data, nrounds, watchlist = list(),
       niter_init <- xgb.ntree(bst) %/% (num_parallel_tree * num_class)
     }
   }
-  if(is_update && nrounds > niter_init)
+  if (is_update && nrounds > niter_init)
     stop("nrounds cannot be larger than ", niter_init, " (nrounds of xgb_model)")
-
-  # TODO: distributed code
-  rank <- 0
 
   niter_skip <- ifelse(is_update, 0, niter_init)
   begin_iteration <- niter_skip + 1
@@ -345,7 +346,6 @@ xgb.train <- function(params = list(), data, nrounds, watchlist = list(),
 
     xgb.iter.update(bst$handle, dtrain, iteration - 1, obj)
 
-    bst_evaluation <- numeric(0)
     if (length(watchlist) > 0)
       bst_evaluation <- xgb.iter.eval(bst$handle, watchlist, iteration - 1, feval)
 
@@ -360,7 +360,7 @@ xgb.train <- function(params = list(), data, nrounds, watchlist = list(),
   bst <- xgb.Booster.complete(bst, saveraw = TRUE)
 
   # store the total number of boosting iterations
-  bst$niter = end_iteration
+  bst$niter <- end_iteration
 
   # store the evaluation results
   if (length(evaluation_log) > 0 &&

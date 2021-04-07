@@ -5,10 +5,10 @@ XGBoost GPU Support
 This page contains information about GPU algorithms supported in XGBoost.
 To install GPU support, checkout the :doc:`/build`.
 
-.. note:: CUDA 9.0, Compute Capability 3.5 required
+.. note:: CUDA 10.0, Compute Capability 3.5 required
 
   The GPU algorithms in XGBoost require a graphics card with compute capability 3.5 or higher, with
-  CUDA toolkits 9.0 or later.
+  CUDA toolkits 10.0 or later.
   (See `this list <https://en.wikipedia.org/wiki/CUDA#GPUs_supported>`_ to look up compute capability of your GPU card.)
 
 *********************************************
@@ -85,6 +85,19 @@ The GPU algorithms currently work with CLI, Python and R packages. See :doc:`/bu
   XGBRegressor(tree_method='gpu_hist', gpu_id=0)
 
 
+GPU-Accelerated SHAP values
+=============================
+XGBoost makes use of `GPUTreeShap <https://github.com/rapidsai/gputreeshap>`_ as a backend for computing shap values when the GPU predictor is selected.
+
+.. code-block:: python
+
+  model.set_param({"predictor": "gpu_predictor"})
+  shap_values = model.predict(dtrain, pred_contribs=True)
+  shap_interaction_values = model.predict(dtrain, pred_interactions=True)
+
+See examples `here
+<https://github.com/dmlc/xgboost/tree/master/demo/gpu_acceleration>`_.
+
 Multi-node Multi-GPU Training
 =============================
 XGBoost supports fully distributed GPU training using `Dask <https://dask.org/>`_. For
@@ -97,39 +110,43 @@ Objective functions
 ===================
 Most of the objective functions implemented in XGBoost can be run on GPU.  Following table shows current support status.
 
-+--------------------+-------------+
-| Objectives         | GPU support |
-+--------------------+-------------+
-| reg:squarederror   | |tick|      |
-+--------------------+-------------+
-| reg:squaredlogerror| |tick|      |
-+--------------------+-------------+
-| reg:logistic       | |tick|      |
-+--------------------+-------------+
-| binary:logistic    | |tick|      |
-+--------------------+-------------+
-| binary:logitraw    | |tick|      |
-+--------------------+-------------+
-| binary:hinge       | |tick|      |
-+--------------------+-------------+
-| count:poisson      | |tick|      |
-+--------------------+-------------+
-| reg:gamma          | |tick|      |
-+--------------------+-------------+
-| reg:tweedie        | |tick|      |
-+--------------------+-------------+
-| multi:softmax      | |tick|      |
-+--------------------+-------------+
-| multi:softprob     | |tick|      |
-+--------------------+-------------+
-| survival:cox       | |cross|     |
-+--------------------+-------------+
-| rank:pairwise      | |tick|      |
-+--------------------+-------------+
-| rank:ndcg          | |tick|      |
-+--------------------+-------------+
-| rank:map           | |tick|      |
-+--------------------+-------------+
++----------------------+-------------+
+| Objectives           | GPU support |
++----------------------+-------------+
+| reg:squarederror     | |tick|      |
++----------------------+-------------+
+| reg:squaredlogerror  | |tick|      |
++----------------------+-------------+
+| reg:logistic         | |tick|      |
++----------------------+-------------+
+| reg:pseudohubererror | |tick|      |
++----------------------+-------------+
+| binary:logistic      | |tick|      |
++----------------------+-------------+
+| binary:logitraw      | |tick|      |
++----------------------+-------------+
+| binary:hinge         | |tick|      |
++----------------------+-------------+
+| count:poisson        | |tick|      |
++----------------------+-------------+
+| reg:gamma            | |tick|      |
++----------------------+-------------+
+| reg:tweedie          | |tick|      |
++----------------------+-------------+
+| multi:softmax        | |tick|      |
++----------------------+-------------+
+| multi:softprob       | |tick|      |
++----------------------+-------------+
+| survival:cox         | |cross|     |
++----------------------+-------------+
+| survival:aft         | |tick|      |
++----------------------+-------------+
+| rank:pairwise        | |tick|      |
++----------------------+-------------+
+| rank:ndcg            | |tick|      |
++----------------------+-------------+
+| rank:map             | |tick|      |
++----------------------+-------------+
 
 Objective will run on GPU if GPU updater (``gpu_hist``), otherwise they will run on CPU by
 default.  For unsupported objectives XGBoost will fall back to using CPU implementation by
@@ -140,41 +157,49 @@ Metric functions
 ===================
 Following table shows current support status for evaluation metrics on the GPU.
 
-+-----------------+-------------+
-| Metric          | GPU Support |
-+=================+=============+
-| rmse            | |tick|      |
-+-----------------+-------------+
-| rmsle           | |tick|      |
-+-----------------+-------------+
-| mae             | |tick|      |
-+-----------------+-------------+
-| logloss         | |tick|      |
-+-----------------+-------------+
-| error           | |tick|      |
-+-----------------+-------------+
-| merror          | |tick|      |
-+-----------------+-------------+
-| mlogloss        | |tick|      |
-+-----------------+-------------+
-| auc             | |tick|      |
-+-----------------+-------------+
-| aucpr           | |cross|     |
-+-----------------+-------------+
-| ndcg            | |tick|      |
-+-----------------+-------------+
-| map             | |tick|      |
-+-----------------+-------------+
-| poisson-nloglik | |tick|      |
-+-----------------+-------------+
-| gamma-nloglik   | |tick|      |
-+-----------------+-------------+
-| cox-nloglik     | |cross|     |
-+-----------------+-------------+
-| gamma-deviance  | |tick|      |
-+-----------------+-------------+
-| tweedie-nloglik | |tick|      |
-+-----------------+-------------+
++------------------------------+-------------+
+| Metric                       | GPU Support |
++==============================+=============+
+| rmse                         | |tick|      |
++------------------------------+-------------+
+| rmsle                        | |tick|      |
++------------------------------+-------------+
+| mae                          | |tick|      |
++------------------------------+-------------+
+| mape                         | |tick|      |
++------------------------------+-------------+
+| mphe                         | |tick|      |
++------------------------------+-------------+
+| logloss                      | |tick|      |
++------------------------------+-------------+
+| error                        | |tick|      |
++------------------------------+-------------+
+| merror                       | |tick|      |
++------------------------------+-------------+
+| mlogloss                     | |tick|      |
++------------------------------+-------------+
+| auc                          | |tick|      |
++------------------------------+-------------+
+| aucpr                        | |cross|     |
++------------------------------+-------------+
+| ndcg                         | |tick|      |
++------------------------------+-------------+
+| map                          | |tick|      |
++------------------------------+-------------+
+| poisson-nloglik              | |tick|      |
++------------------------------+-------------+
+| gamma-nloglik                | |tick|      |
++------------------------------+-------------+
+| cox-nloglik                  | |cross|     |
++------------------------------+-------------+
+| aft-nloglik                  | |tick|      |
++------------------------------+-------------+
+| interval-regression-accuracy | |tick|      |
++------------------------------+-------------+
+| gamma-deviance               | |tick|      |
++------------------------------+-------------+
+| tweedie-nloglik              | |tick|      |
++------------------------------+-------------+
 
 Similar to objective functions, default device for metrics is selected based on tree
 updater and predictor (which is selected based on tree updater).

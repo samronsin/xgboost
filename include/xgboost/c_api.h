@@ -64,6 +64,23 @@ XGB_DLL const char *XGBGetLastError(void);
 XGB_DLL int XGBRegisterLogCallback(void (*callback)(const char*));
 
 /*!
+ * \brief Set global configuration (collection of parameters that apply globally). This function
+ *        accepts the list of key-value pairs representing the global-scope parameters to be
+ *        configured. The list of key-value pairs are passed in as a JSON string.
+ * \param json_str a JSON string representing the list of key-value pairs. The JSON object shall
+ *                 be flat: no value can be a JSON object or an array.
+ * \return 0 for success, -1 for failure
+ */
+XGB_DLL int XGBSetGlobalConfig(const char* json_str);
+
+/*!
+ * \brief Get current global configuration (collection of parameters that apply globally).
+ * \param json_str pointer to received returned global configuration, represented as a JSON string.
+ * \return 0 for success, -1 for failure
+ */
+XGB_DLL int XGBGetGlobalConfig(const char** json_str);
+
+/*!
  * \brief load a data matrix
  * \param fname the name of the file
  * \param silent whether print messages during loading
@@ -81,7 +98,7 @@ XGB_DLL int XGDMatrixCreateFromFile(const char *fname,
  * \param data fvalue
  * \param nindptr number of rows in the matrix + 1
  * \param nelem number of nonzero elements in the matrix
- * \param num_col number of columns; when it's set to 0, then guess from data
+ * \param num_col number of columns; when it's set to kAdapterUnknownSize, then guess from data
  * \param out created dmatrix
  * \return 0 when success, -1 when failure happens
  */
@@ -92,6 +109,27 @@ XGB_DLL int XGDMatrixCreateFromCSREx(const size_t* indptr,
                                      size_t nelem,
                                      size_t num_col,
                                      DMatrixHandle* out);
+
+/*!
+ * \brief Create a matrix from CSR matrix.
+ * \param indptr  JSON encoded __array_interface__ to row pointers in CSR.
+ * \param indices JSON encoded __array_interface__ to column indices in CSR.
+ * \param data    JSON encoded __array_interface__ to values in CSR.
+ * \param num_col Number of columns.
+ * \param json_config JSON encoded configuration.  Required values are:
+ *
+ *          - missing
+ *          - nthread
+ *
+ * \param out created dmatrix
+ * \return 0 when success, -1 when failure happens
+ */
+XGB_DLL int XGDMatrixCreateFromCSR(char const *indptr,
+                                   char const *indices, char const *data,
+                                   bst_ulong ncol,
+                                   char const* json_config,
+                                   DMatrixHandle* out);
+
 /*!
  * \brief create a matrix content from CSC format
  * \param col_ptr pointer to col headers
@@ -416,6 +454,102 @@ XGB_DLL int XGDMatrixSetUIntInfo(DMatrixHandle handle,
                                  bst_ulong len);
 
 /*!
+ * \brief Set string encoded information of all features.
+ *
+ * Accepted fields are:
+ *   - feature_name
+ *   - feature_type
+ *
+ * \param handle    An instance of data matrix
+ * \param field     Feild name
+ * \param features  Pointer to array of strings.
+ * \param size      Size of `features` pointer (number of strings passed in).
+ *
+ * \return 0 when success, -1 when failure happens
+ *
+ * \code
+ *
+ *   char const* feat_names [] {"feat_0", "feat_1"};
+ *   XGDMatrixSetStrFeatureInfo(handle, "feature_name", feat_names, 2);
+ *
+ *   // i for integer, q for quantitive.  Similarly "int" and "float" are also recognized.
+ *   char const* feat_types [] {"i", "q"};
+ *   XGDMatrixSetStrFeatureInfo(handle, "feature_type", feat_types, 2);
+ *
+ * \endcode
+ */
+XGB_DLL int XGDMatrixSetStrFeatureInfo(DMatrixHandle handle, const char *field,
+                                       const char **features,
+                                       const bst_ulong size);
+
+/*!
+ * \brief Get string encoded information of all features.
+ *
+ * Accepted fields are:
+ *   - feature_name
+ *   - feature_type
+ *
+ * Caller is responsible for copying out the data, before next call to any API function of
+ * XGBoost.
+ *
+ * \param handle       An instance of data matrix
+ * \param field        Feild name
+ * \param size         Size of output pointer `features` (number of strings returned).
+ * \param out_features Address of a pointer to array of strings.  Result is stored in
+ *                     thread local memory.
+ *
+ * \return 0 when success, -1 when failure happens
+ *
+ * \code
+ *
+ *  char const **c_out_features = NULL;
+ *  bst_ulong out_size = 0;
+ *
+ *  // Asumming the feature names are already set by `XGDMatrixSetStrFeatureInfo`.
+ *  XGDMatrixGetStrFeatureInfo(handle, "feature_name", &out_size,
+ *                             &c_out_features)
+ *
+ *  for (bst_ulong i = 0; i < out_size; ++i) {
+ *    // Here we are simply printing the string.  Copy it out if the feature name is
+ *    // useful after printing.
+ *    printf("feature %lu: %s\n", i, c_out_features[i]);
+ *  }
+ *
+ * \endcode
+ */
+XGB_DLL int XGDMatrixGetStrFeatureInfo(DMatrixHandle handle, const char *field,
+                                       bst_ulong *size,
+                                       const char ***out_features);
+
+/*!
+ * \brief Set meta info from dense matrix.  Valid field names are:
+ *
+ *  - label
+ *  - weight
+ *  - base_margin
+ *  - group
+ *  - label_lower_bound
+ *  - label_upper_bound
+ *  - feature_weights
+ *
+ * \param handle An instance of data matrix
+ * \param field  Feild name
+ * \param data   Pointer to consecutive memory storing data.
+ * \param size   Size of the data, this is relative to size of type.  (Meaning NOT number
+ *               of bytes.)
+ * \param type   Indicator of data type.  This is defined in xgboost::DataType enum class.
+ *
+ *    float    = 1
+ *    double   = 2
+ *    uint32_t = 3
+ *    uint64_t = 4
+ *
+ * \return 0 when success, -1 when failure happens
+ */
+XGB_DLL int XGDMatrixSetDenseInfo(DMatrixHandle handle, const char *field,
+                                  void *data, bst_ulong size, int type);
+
+/*!
  * \brief (deprecated) Use XGDMatrixSetUIntInfo instead. Set group of the training matrix
  * \param handle a instance of data matrix
  * \param group pointer to group size
@@ -485,6 +619,32 @@ XGB_DLL int XGBoosterCreate(const DMatrixHandle dmats[],
 XGB_DLL int XGBoosterFree(BoosterHandle handle);
 
 /*!
+ * \brief Slice a model using boosting index. The slice m:n indicates taking all trees
+ *        that were fit during the boosting rounds m, (m+1), (m+2), ..., (n-1).
+ *
+ * \param handle Booster to be sliced.
+ * \param begin_layer start of the slice
+ * \param end_layer end of the slice; end_layer=0 is equivalent to
+ *                  end_layer=num_boost_round
+ * \param step step size of the slice
+ * \param out Sliced booster.
+ *
+ * \return 0 when success, -1 when failure happens, -2 when index is out of bound.
+ */
+XGB_DLL int XGBoosterSlice(BoosterHandle handle, int begin_layer,
+                           int end_layer, int step,
+                           BoosterHandle *out);
+
+/*!
+ * \brief Get number of boosted rounds from gradient booster.  When process_type is
+ *        update, this number might drop due to removed tree.
+ * \param handle Handle to booster.
+ * \param out Pointer to output integer.
+ * \return 0 when success, -1 when failure happens
+ */
+XGB_DLL int XGBoosterBoostedRounds(BoosterHandle handle, int* out);
+
+/*!
  * \brief set parameters
  * \param handle handle
  * \param name  parameter name
@@ -494,6 +654,14 @@ XGB_DLL int XGBoosterFree(BoosterHandle handle);
 XGB_DLL int XGBoosterSetParam(BoosterHandle handle,
                               const char *name,
                               const char *value);
+
+/*!
+ * \brief get number of features
+ * \param out number of features
+ * \return 0 when success, -1 when failure happens
+ */
+XGB_DLL int XGBoosterGetNumFeature(BoosterHandle handle,
+                                   bst_ulong *out);
 
 /*!
  * \brief update the model in one round using dtrain
@@ -536,8 +704,9 @@ XGB_DLL int XGBoosterEvalOneIter(BoosterHandle handle,
                                  const char *evnames[],
                                  bst_ulong len,
                                  const char **out_result);
+
 /*!
- * \brief make prediction based on dmat
+ * \brief make prediction based on dmat (deprecated, use `XGBoosterPredictFromDMatrix` instead)
  * \param handle handle
  * \param dmat data matrix
  * \param option_mask bit-mask of options taken in prediction, possible values
@@ -566,6 +735,167 @@ XGB_DLL int XGBoosterPredict(BoosterHandle handle,
                              int training,
                              bst_ulong *out_len,
                              const float **out_result);
+/*!
+ * \brief Make prediction from DMatrix, replacing `XGBoosterPredict`.
+ *
+ * \param handle Booster handle
+ * \param dmat   DMatrix handle
+ * \param c_json_config String encoded predict configuration in JSON format, with
+ *                      following available fields in the JSON object:
+ *
+ *    "type": [0, 6]
+ *      0: normal prediction
+ *      1: output margin
+ *      2: predict contribution
+ *      3: predict approximated contribution
+ *      4: predict feature interaction
+ *      5: predict approximated feature interaction
+ *      6: predict leaf
+ *    "training": bool
+ *      Whether the prediction function is used as part of a training loop.  **Not used
+ *      for inplace prediction**.
+ *
+ *      Prediction can be run in 2 scenarios:
+ *        1. Given data matrix X, obtain prediction y_pred from the model.
+ *        2. Obtain the prediction for computing gradients. For example, DART booster performs dropout
+ *           during training, and the prediction result will be different from the one obtained by normal
+ *           inference step due to dropped trees.
+ *      Set training=false for the first scenario. Set training=true for the second
+ *      scenario.  The second scenario applies when you are defining a custom objective
+ *      function.
+ *    "iteration_begin": int
+ *      Beginning iteration of prediction.
+ *    "iteration_end": int
+ *      End iteration of prediction.  Set to 0 this will become the size of tree model (all the trees).
+ *    "strict_shape": bool
+ *      Whether should we reshape the output with stricter rules.  If set to true,
+ *      normal/margin/contrib/interaction predict will output consistent shape
+ *      disregarding the use of multi-class model, and leaf prediction will output 4-dim
+ *      array representing: (n_samples, n_iterations, n_classes, n_trees_in_forest)
+ *
+ *   Run a normal prediction with strict output shape, 2 dim for softprob , 1 dim for others.
+ *   \code
+ *      {
+ *         "type": 0,
+ *         "training": False,
+ *         "iteration_begin": 0,
+ *         "iteration_end": 0,
+ *         "strict_shape": true,
+ *     }
+ *   \endcode
+ *
+ * \param out_shape Shape of output prediction (copy before use).
+ * \param out_dim   Dimension of output prediction.
+ * \param out_result Buffer storing prediction value (copy before use).
+ *
+ * \return 0 when success, -1 when failure happens
+ */
+XGB_DLL int XGBoosterPredictFromDMatrix(BoosterHandle handle,
+                                        DMatrixHandle dmat,
+                                        char const* c_json_config,
+                                        bst_ulong const **out_shape,
+                                        bst_ulong *out_dim,
+                                        float const **out_result);
+/*
+ * \brief Inplace prediction from CPU dense matrix.
+ *
+ * \param handle        Booster handle.
+ * \param values        JSON encoded __array_interface__ to values.
+ * \param c_json_config See `XGBoosterPredictFromDMatrix` for more info.
+ *
+ *   Additional fields for inplace prediction are:
+ *     "missing": float
+ *
+ * \param m             An optional (NULL if not available) proxy DMatrix instance
+ *                      storing meta info.
+ *
+ * \param out_shape     See `XGBoosterPredictFromDMatrix` for more info.
+ * \param out_dim       See `XGBoosterPredictFromDMatrix` for more info.
+ * \param out_result    See `XGBoosterPredictFromDMatrix` for more info.
+ *
+ * \return 0 when success, -1 when failure happens
+ */
+XGB_DLL int XGBoosterPredictFromDense(BoosterHandle handle,
+                                      char const *values,
+                                      char const *c_json_config,
+                                      DMatrixHandle m,
+                                      bst_ulong const **out_shape,
+                                      bst_ulong *out_dim,
+                                      const float **out_result);
+
+/*
+ * \brief Inplace prediction from CPU CSR matrix.
+ *
+ * \param handle        Booster handle.
+ * \param indptr        JSON encoded __array_interface__ to row pointer in CSR.
+ * \param indices       JSON encoded __array_interface__ to column indices in CSR.
+ * \param values        JSON encoded __array_interface__ to values in CSR..
+ * \param ncol          Number of features in data.
+ * \param c_json_config See `XGBoosterPredictFromDMatrix` for more info.
+ *   Additional fields for inplace prediction are:
+ *     "missing": float
+ *
+ * \param m             An optional (NULL if not available) proxy DMatrix instance
+ *                      storing meta info.
+ *
+ * \param out_shape     See `XGBoosterPredictFromDMatrix` for more info.
+ * \param out_dim       See `XGBoosterPredictFromDMatrix` for more info.
+ * \param out_result    See `XGBoosterPredictFromDMatrix` for more info.
+ *
+ * \return 0 when success, -1 when failure happens
+ */
+XGB_DLL int XGBoosterPredictFromCSR(BoosterHandle handle, char const *indptr,
+                                    char const *indices, char const *values,
+                                    bst_ulong ncol,
+                                    char const *c_json_config, DMatrixHandle m,
+                                    bst_ulong const **out_shape,
+                                    bst_ulong *out_dim,
+                                    const float **out_result);
+
+/*
+ * \brief Inplace prediction from CUDA Dense matrix (cupy in Python).
+ *
+ * \param handle        Booster handle
+ * \param values        JSON encoded __cuda_array_interface__ to values.
+ * \param c_json_config See `XGBoosterPredictFromDMatrix` for more info.
+ *   Additional fields for inplace prediction are:
+ *     "missing": float
+ *
+ * \param m             An optional (NULL if not available) proxy DMatrix instance
+ *                      storing meta info.
+ * \param out_shape     See `XGBoosterPredictFromDMatrix` for more info.
+ * \param out_dim       See `XGBoosterPredictFromDMatrix` for more info.
+ * \param out_result    See `XGBoosterPredictFromDMatrix` for more info.
+ *
+ * \return 0 when success, -1 when failure happens
+ */
+XGB_DLL int XGBoosterPredictFromCudaArray(
+    BoosterHandle handle, char const *values, char const *c_json_config,
+    DMatrixHandle m, bst_ulong const **out_shape, bst_ulong *out_dim,
+    const float **out_result);
+
+/*
+ * \brief Inplace prediction from CUDA dense dataframe (cuDF in Python).
+ *
+ * \param handle        Booster handle
+ * \param values        List of __cuda_array_interface__ for all columns encoded in JSON list.
+ * \param c_json_config See `XGBoosterPredictFromDMatrix` for more info.
+ *   Additional fields for inplace prediction are:
+ *     "missing": float
+ *
+ * \param m             An optional (NULL if not available) proxy DMatrix instance
+ *                      storing meta info.
+ * \param out_shape     See `XGBoosterPredictFromDMatrix` for more info.
+ * \param out_dim       See `XGBoosterPredictFromDMatrix` for more info.
+ * \param out_result    See `XGBoosterPredictFromDMatrix` for more info.
+ *
+ * \return 0 when success, -1 when failure happens
+ */
+XGB_DLL int XGBoosterPredictFromCudaColumnar(
+    BoosterHandle handle, char const *values, char const *c_json_config,
+    DMatrixHandle m, bst_ulong const **out_shape, bst_ulong *out_dim,
+    const float **out_result);
+
 
 /*
  * ========================== Begin Serialization APIs =========================
@@ -575,8 +905,9 @@ XGB_DLL int XGBoosterPredict(BoosterHandle handle,
  *
  * - Functions with the term "Model" handles saving/loading XGBoost model like trees or
  *   linear weights.  Striping out parameters configuration like training algorithms or
- *   CUDA device ID helps user to reuse the trained model for different tasks, examples
- *   are prediction, training continuation or interpretation.
+ *   CUDA device ID.  These functions are designed to let users reuse the trained model
+ *   for different tasks, examples are prediction, training continuation or model
+ *   interpretation.
  *
  * - Functions with the term "Config" handles save/loading configuration.  It helps user
  *   to study the internal of XGBoost.  Also user can use the load method for specifying
@@ -592,7 +923,7 @@ XGB_DLL int XGBoosterPredict(BoosterHandle handle,
 /*!
  * \brief Load model from existing file
  * \param handle handle
- * \param fname file name
+ * \param fname File URI or file name.
 * \return 0 when success, -1 when failure happens
  */
 XGB_DLL int XGBoosterLoadModel(BoosterHandle handle,
@@ -600,7 +931,7 @@ XGB_DLL int XGBoosterLoadModel(BoosterHandle handle,
 /*!
  * \brief Save model into existing file
  * \param handle handle
- * \param fname file name
+ * \param fname File URI or file name.
  * \return 0 when success, -1 when failure happens
  */
 XGB_DLL int XGBoosterSaveModel(BoosterHandle handle,
@@ -803,4 +1134,46 @@ XGB_DLL int XGBoosterSetAttr(BoosterHandle handle,
 XGB_DLL int XGBoosterGetAttrNames(BoosterHandle handle,
                                   bst_ulong* out_len,
                                   const char*** out);
+
+/*!
+ * \brief Set string encoded feature info in Booster, similar to the feature
+ *        info in DMatrix.
+ *
+ * Accepted fields are:
+ *   - feature_name
+ *   - feature_type
+ *
+ * \param handle    An instance of Booster
+ * \param field     Feild name
+ * \param features  Pointer to array of strings.
+ * \param size      Size of `features` pointer (number of strings passed in).
+ *
+ * \return 0 when success, -1 when failure happens
+ */
+XGB_DLL int XGBoosterSetStrFeatureInfo(BoosterHandle handle, const char *field,
+                                       const char **features,
+                                       const bst_ulong size);
+
+/*!
+ * \brief Get string encoded feature info from Booster, similar to feature info
+ *        in DMatrix.
+ *
+ * Accepted fields are:
+ *   - feature_name
+ *   - feature_type
+ *
+ * Caller is responsible for copying out the data, before next call to any API
+ * function of XGBoost.
+ *
+ * \param handle       An instance of Booster
+ * \param field        Feild name
+ * \param size         Size of output pointer `features` (number of strings returned).
+ * \param out_features Address of a pointer to array of strings. Result is stored in
+ *        thread local memory.
+ *
+ * \return 0 when success, -1 when failure happens
+ */
+XGB_DLL int XGBoosterGetStrFeatureInfo(BoosterHandle handle, const char *field,
+                                       bst_ulong *len,
+                                       const char ***out_features);
 #endif  // XGBOOST_C_API_H_

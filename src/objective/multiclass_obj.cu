@@ -49,7 +49,12 @@ class SoftmaxMultiClassObj : public ObjFunction {
                    const MetaInfo& info,
                    int iter,
                    HostDeviceVector<GradientPair>* out_gpair) override {
-    CHECK_NE(info.labels_.Size(), 0U) << "label set cannot be empty";
+    // Remove unused parameter compiler warning.
+    (void) iter;
+
+    if (info.labels_.Size() == 0) {
+      return;
+    }
     CHECK(preds.Size() == (static_cast<size_t>(param_.num_class) * info.labels_.Size()))
         << "SoftmaxMultiClassObj: label size and pred size does not match.\n"
         << "label.Size() * num_class: "
@@ -123,7 +128,7 @@ class SoftmaxMultiClassObj : public ObjFunction {
     this->Transform(io_preds, true);
   }
   const char* DefaultEvalMetric() const override {
-    return "merror";
+    return "mlogloss";
   }
 
   inline void Transform(HostDeviceVector<bst_float> *io_preds, bool prob) {
@@ -131,7 +136,7 @@ class SoftmaxMultiClassObj : public ObjFunction {
     const auto ndata = static_cast<int64_t>(io_preds->Size() / nclass);
     max_preds_.Resize(ndata);
 
-    auto device = tparam_->gpu_id;
+    auto device = io_preds->DeviceIdx();
     if (prob) {
       common::Transform<>::Init(
           [=] XGBOOST_DEVICE(size_t _idx, common::Span<bst_float> _preds) {

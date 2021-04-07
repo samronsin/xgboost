@@ -11,6 +11,7 @@
 
 #include "xgboost/data.h"
 #include "xgboost/host_device_vector.h"
+#include "xgboost/tree_model.h"
 #include "device_helpers.cuh"
 
 namespace xgboost {
@@ -91,7 +92,10 @@ class HostDeviceVectorImpl {
     } else {
       gpu_access_ = GPUAccess::kWrite;
       SetDevice();
-      thrust::fill(data_d_->begin(), data_d_->end(), v);
+      auto s_data = dh::ToSpan(*data_d_);
+      dh::LaunchN(device_, data_d_->size(), [=]XGBOOST_DEVICE(size_t i) {
+          s_data[i] = v;
+      });
     }
   }
 
@@ -205,10 +209,10 @@ class HostDeviceVectorImpl {
     // data is on the host
     LazyResizeDevice(data_h_.size());
     SetDevice();
-    dh::safe_cuda(cudaMemcpy(data_d_->data().get(),
-                             data_h_.data(),
-                             data_d_->size() * sizeof(T),
-                             cudaMemcpyHostToDevice));
+    dh::safe_cuda(cudaMemcpyAsync(data_d_->data().get(),
+                                  data_h_.data(),
+                                  data_d_->size() * sizeof(T),
+                                  cudaMemcpyHostToDevice));
     gpu_access_ = access;
   }
 
@@ -398,9 +402,13 @@ template class HostDeviceVector<bst_float>;
 template class HostDeviceVector<GradientPair>;
 template class HostDeviceVector<int32_t>;   // bst_node_t
 template class HostDeviceVector<uint8_t>;
+template class HostDeviceVector<FeatureType>;
 template class HostDeviceVector<Entry>;
 template class HostDeviceVector<uint64_t>;  // bst_row_t
 template class HostDeviceVector<uint32_t>;  // bst_feature_t
+template class HostDeviceVector<RegTree::Node>;
+template class HostDeviceVector<RegTree::Segment>;
+template class HostDeviceVector<RTreeNodeStat>;
 
 #if defined(__APPLE__)
 /*

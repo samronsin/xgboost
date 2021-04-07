@@ -22,6 +22,8 @@ Contents
   XGBoost User Forum <https://discuss.xgboost.ai>
   GPU support <gpu/index>
   parameter
+  prediction
+  treemethod
   Python package <python/index>
   R package <R-package/index>
   JVM package <jvm/index>

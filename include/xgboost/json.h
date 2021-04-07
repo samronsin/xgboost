@@ -1,11 +1,12 @@
 /*!
- * Copyright (c) by XGBoost Contributors 2019-2020
+ * Copyright (c) by XGBoost Contributors 2019-2021
  */
 #ifndef XGBOOST_JSON_H_
 #define XGBOOST_JSON_H_
 
 #include <xgboost/logging.h>
 #include <xgboost/parameter.h>
+#include <xgboost/intrusive_ptr.h>
 
 #include <map>
 #include <memory>
@@ -21,6 +22,13 @@ class JsonReader;
 class JsonWriter;
 
 class Value {
+ private:
+  mutable class IntrusivePtrCell ref_;
+  friend IntrusivePtrCell &
+  IntrusivePtrRefCount(xgboost::Value const *t) noexcept {
+    return t->ref_;
+  }
+
  public:
   /*!\brief Simplified implementation of LLVM RTTI. */
   enum class ValueKind {
@@ -69,12 +77,15 @@ T* Cast(U* value) {
 
 class JsonString : public Value {
   std::string str_;
+
  public:
   JsonString() : Value(ValueKind::kString) {}
   JsonString(std::string const& str) :  // NOLINT
       Value(ValueKind::kString), str_{str} {}
   JsonString(std::string&& str) :  // NOLINT
       Value(ValueKind::kString), str_{std::move(str)} {}
+  JsonString(JsonString&& str) noexcept :  // NOLINT
+      Value(ValueKind::kString), str_{std::move(str.str_)} {}
 
   void Save(JsonWriter* writer) override;
 
@@ -167,6 +178,8 @@ class JsonNumber : public Value {
             typename std::enable_if<std::is_same<FloatT, double>::value>::type* = nullptr>
   JsonNumber(FloatT value) : Value{ValueKind::kNumber},  // NOLINT
                              number_{static_cast<Float>(value)} {}
+  JsonNumber(JsonNumber const& that) = delete;
+  JsonNumber(JsonNumber&& that) noexcept : Value{ValueKind::kNumber}, number_{that.number_} {}
 
   void Save(JsonWriter* writer) override;
 
@@ -214,6 +227,9 @@ class JsonInteger : public Value {
       : Value(ValueKind::kInteger),
         integer_{static_cast<Int>(value)} {}
 
+  JsonInteger(JsonInteger &&that) noexcept
+      : Value{ValueKind::kInteger}, integer_{that.integer_} {}
+
   Json& operator[](std::string const & key) override;
   Json& operator[](int ind) override;
 
@@ -234,6 +250,7 @@ class JsonNull : public Value {
  public:
   JsonNull() : Value(ValueKind::kNull) {}
   JsonNull(std::nullptr_t) : Value(ValueKind::kNull) {}  // NOLINT
+  JsonNull(JsonNull&&) noexcept : Value(ValueKind::kNull) {}
 
   void Save(JsonWriter* writer) override;
 
@@ -250,7 +267,7 @@ class JsonNull : public Value {
 
 /*! \brief Describes both true and false. */
 class JsonBoolean : public Value {
-  bool boolean_;
+  bool boolean_ = false;
 
  public:
   JsonBoolean() : Value(ValueKind::kBoolean) {}  // NOLINT
@@ -261,6 +278,8 @@ class JsonBoolean : public Value {
               std::is_same<Bool, bool const>::value>::type* = nullptr>
   JsonBoolean(Bool value) :  // NOLINT
       Value(ValueKind::kBoolean), boolean_{value} {}
+  JsonBoolean(JsonBoolean&& value) noexcept:  // NOLINT
+      Value(ValueKind::kBoolean), boolean_{value.boolean_} {}
 
   void Save(JsonWriter* writer) override;
 
@@ -282,12 +301,15 @@ class JsonBoolean : public Value {
 struct StringView {
  private:
   using CharT = char;  // unsigned char
+  using Traits = std::char_traits<CharT>;
   CharT const* str_;
   size_t size_;
 
  public:
   StringView() = default;
   StringView(CharT const* str, size_t size) : str_{str}, size_{size} {}
+  explicit StringView(std::string const& str): str_{str.c_str()}, size_{str.size()} {}
+  explicit StringView(CharT const* str) : str_{str}, size_{Traits::length(str)} {}
 
   CharT const& operator[](size_t p) const { return str_[p]; }
   CharT const& at(size_t p) const {  // NOLINT
@@ -303,8 +325,15 @@ struct StringView {
     CHECK_LE(beg, size_);
     return std::string {str_ + beg, n < (size_ - beg) ? n : (size_ - beg)};
   }
-  char const* c_str() const { return str_; }  // NOLINT
+  CharT const* c_str() const { return str_; }  // NOLINT
+
+  CharT const* cbegin() const { return str_; }         // NOLINT
+  CharT const* cend() const { return str_ + size(); }  // NOLINT
+  CharT const* begin() const { return str_; }          // NOLINT
+  CharT const* end() const { return str_ + size(); }   // NOLINT
 };
+
+std::ostream &operator<<(std::ostream &os, StringView const v);
 
 /*!
  * \brief Data structure representing JSON format.
@@ -336,14 +365,14 @@ class Json {
   Json() : ptr_{new JsonNull} {}
 
   // number
-  explicit Json(JsonNumber number) : ptr_{new JsonNumber(number)} {}
+  explicit Json(JsonNumber number) : ptr_{new JsonNumber(std::move(number))} {}
   Json& operator=(JsonNumber number) {
     ptr_.reset(new JsonNumber(std::move(number)));
     return *this;
   }
 
   // integer
-  explicit Json(JsonInteger integer) : ptr_{new JsonInteger(integer)} {}
+  explicit Json(JsonInteger integer) : ptr_{new JsonInteger(std::move(integer))} {}
   Json& operator=(JsonInteger integer) {
     ptr_.reset(new JsonInteger(std::move(integer)));
     return *this;
@@ -418,7 +447,7 @@ class Json {
   }
 
  private:
-  std::shared_ptr<Value> ptr_;
+  IntrusivePtr<Value> ptr_;
 };
 
 template <typename T>
@@ -538,7 +567,6 @@ using String  = JsonString;
 using Null    = JsonNull;
 
 // Utils tailored for XGBoost.
-
 template <typename Parameter>
 Object ToJson(Parameter const& param) {
   Object obj;
@@ -549,13 +577,13 @@ Object ToJson(Parameter const& param) {
 }
 
 template <typename Parameter>
-void FromJson(Json const& obj, Parameter* param) {
+Args FromJson(Json const& obj, Parameter* param) {
   auto const& j_param = get<Object const>(obj);
   std::map<std::string, std::string> m;
   for (auto const& kv : j_param) {
     m[kv.first] = get<String const>(kv.second);
   }
-  param->UpdateAllowUnknown(m);
+  return param->UpdateAllowUnknown(m);
 }
 }  // namespace xgboost
 #endif  // XGBOOST_JSON_H_

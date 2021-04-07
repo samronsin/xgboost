@@ -1,5 +1,5 @@
 /*!
- * Copyright (c) by Contributors 2019
+ * Copyright (c) by Contributors 2019-2021
  */
 #include <gtest/gtest.h>
 #include <dmlc/filesystem.h>
@@ -222,7 +222,7 @@ TEST(Json, ParseArray) {
   auto json = Json::Load(StringView{str.c_str(), str.size()});
   json = json["nodes"];
   std::vector<Json> arr = get<JsonArray>(json);
-  ASSERT_EQ(arr.size(), 3);
+  ASSERT_EQ(arr.size(), 3ul);
   Json v0 = arr[0];
   ASSERT_EQ(get<Integer>(v0["depth"]), 3);
   ASSERT_NEAR(get<Number>(v0["gain"]), 10.4866, kRtEps);
@@ -284,7 +284,7 @@ TEST(Json, EmptyArray) {
   std::istringstream iss(str);
   auto json = Json::Load(StringView{str.c_str(), str.size()});
   auto arr = get<JsonArray>(json["leaf_vector"]);
-  ASSERT_EQ(arr.size(), 0);
+  ASSERT_EQ(arr.size(), 0ul);
 }
 
 TEST(Json, Boolean) {
@@ -315,7 +315,7 @@ TEST(Json, AssigningObjects) {
     Json json;
     json = JsonObject();
     json["Okay"] = JsonArray();
-    ASSERT_EQ(get<JsonArray>(json["Okay"]).size(), 0);
+    ASSERT_EQ(get<JsonArray>(json["Okay"]).size(), 0ul);
   }
 
   {
@@ -373,6 +373,11 @@ TEST(Json, AssigningNumber) {
     ASSERT_EQ(value, 4);
     value = 15;  // NOLINT
     ASSERT_EQ(get<Number>(json), 4);
+  }
+
+  {
+    Json value {Number(std::numeric_limits<float>::quiet_NaN())};
+    ASSERT_TRUE(IsA<Number>(value));
   }
 }
 
@@ -453,7 +458,8 @@ TEST(Json, Invalid) {
       Json load{Json::Load(StringView(str.c_str(), str.size()))};
     } catch (dmlc::Error const &e) {
       std::string msg = e.what();
-      ASSERT_NE(msg.find("EOF"), std::string::npos);
+      ASSERT_TRUE(msg.find("EOF") != std::string::npos
+                  || msg.find("255") != std::string::npos);  // EOF is printed as 255 on s390x
       has_thrown = true;
     };
     ASSERT_TRUE(has_thrown);
@@ -572,5 +578,15 @@ TEST(Json, DISABLED_RoundTripExhaustive) {
   for (int64_t i = 0; i <= int32_max; ++i) {
     test(static_cast<uint32_t>(i));
   }
+}
+
+TEST(StringView, Basic) {
+  StringView str{"This is a string."};
+  std::stringstream ss;
+  ss << str;
+
+  std::string res = ss.str();
+  ASSERT_EQ(str.size(), res.size());
+  ASSERT_TRUE(std::equal(res.cbegin(), res.cend(), str.cbegin()));
 }
 }  // namespace xgboost

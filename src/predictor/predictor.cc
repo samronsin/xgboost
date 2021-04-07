@@ -11,8 +11,8 @@
 namespace dmlc {
 DMLC_REGISTRY_ENABLE(::xgboost::PredictorReg);
 }  // namespace dmlc
-namespace xgboost {
 
+namespace xgboost {
 void PredictionContainer::ClearExpiredEntries() {
   std::vector<DMatrix*> expired;
   for (auto& kv : container_) {
@@ -26,7 +26,6 @@ void PredictionContainer::ClearExpiredEntries() {
 }
 
 PredictionCacheEntry &PredictionContainer::Cache(std::shared_ptr<DMatrix> m, int32_t device) {
-  std::lock_guard<std::mutex> guard { cache_lock_ };
   this->ClearExpiredEntries();
   container_[m.get()].ref = m;
   if (device != GenericParameter::kCpuId) {
@@ -48,7 +47,7 @@ decltype(PredictionContainer::container_) const& PredictionContainer::Container(
 }
 
 void Predictor::Configure(
-    const std::vector<std::pair<std::string, std::string>>& cfg) {
+    const std::vector<std::pair<std::string, std::string>>&) {
 }
 Predictor* Predictor::Create(
     std::string const& name, GenericParameter const* generic_param) {

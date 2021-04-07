@@ -3,6 +3,10 @@ import xgboost as xgb
 import pytest
 import testing as tm
 import numpy as np
+import sys
+
+if sys.platform.startswith("win"):
+    pytest.skip("Skipping dask tests on Windows", allow_module_level=True)
 
 
 def test_rabit_tracker():
@@ -19,12 +23,15 @@ def test_rabit_tracker():
 
 
 def run_rabit_ops(client, n_workers):
-    from xgboost.dask import RabitContext, _get_rabit_args, _get_client_workers
+    from test_with_dask import _get_client_workers
+    from xgboost.dask import RabitContext, _get_rabit_args
     from xgboost import rabit
 
-    workers = list(_get_client_workers(client).keys())
-    rabit_args = _get_rabit_args(workers, client)
+    workers = _get_client_workers(client)
+    rabit_args = client.sync(_get_rabit_args, len(workers), client)
     assert not rabit.is_distributed()
+    n_workers_from_dask = len(workers)
+    assert n_workers == n_workers_from_dask
 
     def local_test(worker_id):
         with RabitContext(rabit_args):

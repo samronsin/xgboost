@@ -60,19 +60,6 @@ inline data::CupyAdapter AdapterFromData(const thrust::device_vector<float> &x,
 }
 #endif
 
-inline std::vector<float> GenerateRandomCategoricalSingleColumn(int n,
-                                                                int num_categories) {
-  std::vector<float> x(n);
-  std::mt19937 rng(0);
-  std::uniform_int_distribution<int> dist(0, num_categories - 1);
-  std::generate(x.begin(), x.end(), [&]() { return dist(rng); });
-  // Make sure each category is present
-  for(auto i = 0; i < num_categories; i++) {
-    x[i] = i;
-  }
-  return x;
-}
-
 inline std::shared_ptr<data::SimpleDMatrix>
 GetDMatrixFromData(const std::vector<float> &x, int num_rows, int num_columns) {
   data::DenseAdapter adapter(x.data(), num_rows, num_columns);
@@ -117,7 +104,7 @@ inline void TestBinDistribution(const HistogramCuts &cuts, int column_idx,
 
   // First and last bin can have smaller
   for (auto& kv : bin_weights) {
-    EXPECT_LE(std::abs(bin_weights[kv.first] - expected_bin_weight),
+    ASSERT_LE(std::abs(bin_weights[kv.first] - expected_bin_weight),
               allowable_error);
   }
 }
@@ -162,7 +149,7 @@ inline void ValidateColumn(const HistogramCuts& cuts, int column_idx,
 
   // Check all cut points are unique
   EXPECT_EQ(std::set<float>(cuts_begin, cuts_end).size(),
-            cuts_end - cuts_begin);
+            static_cast<size_t>(cuts_end - cuts_begin));
 
   auto unique = std::set<float>(sorted_column.begin(), sorted_column.end());
   if (unique.size() <= num_bins) {
@@ -189,9 +176,10 @@ inline void ValidateCuts(const HistogramCuts& cuts, DMatrix* dmat,
   // Collect data into columns
   std::vector<std::vector<float>> columns(dmat->Info().num_col_);
   for (auto& batch : dmat->GetBatches<SparsePage>()) {
-    CHECK_GT(batch.Size(), 0);
+    auto page = batch.GetView();
+    ASSERT_GT(batch.Size(), 0ul);
     for (auto i = 0ull; i < batch.Size(); i++) {
-      for (auto e : batch[i]) {
+      for (auto e : page[i]) {
         columns[e.index].push_back(e.fvalue);
       }
     }

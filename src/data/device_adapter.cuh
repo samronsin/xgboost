@@ -16,9 +16,14 @@ namespace xgboost {
 namespace data {
 
 struct IsValidFunctor : public thrust::unary_function<Entry, bool> {
-  explicit IsValidFunctor(float missing) : missing(missing) {}
-
   float missing;
+
+  XGBOOST_DEVICE explicit IsValidFunctor(float missing) : missing(missing) {}
+
+  __device__ bool operator()(float value) const {
+    return !(common::CheckNAN(value) || value == missing);
+  }
+
   __device__ bool operator()(const data::COOTuple& e) const {
     if (common::CheckNAN(e.value) || e.value == missing) {
       return false;
@@ -47,7 +52,7 @@ class CudfAdapterBatch : public detail::NoMetaInfo {
     size_t row_idx = idx / columns_.size();
     auto const& column = columns_[column_idx];
     float value = column.valid.Data() == nullptr || column.valid.Check(row_idx)
-                      ? column.GetElement(row_idx)
+                  ? column.GetElement(row_idx, 0)
                       : std::numeric_limits<float>::quiet_NaN();
     return {row_idx, column_idx, value};
   }
@@ -122,10 +127,14 @@ class CudfAdapter : public detail::SingleBatchDataIter<CudfAdapterBatch> {
     CHECK_NE(typestr.front(), '>') << ArrayInterfaceErrors::BigEndian();
     std::vector<ArrayInterface> columns;
     auto first_column = ArrayInterface(get<Object const>(json_columns[0]));
+    num_rows_ = first_column.num_rows;
+    if (num_rows_ == 0) {
+      return;
+    }
+
     device_idx_ = dh::CudaGetPointerDevice(first_column.data);
     CHECK_NE(device_idx_, -1);
     dh::safe_cuda(cudaSetDevice(device_idx_));
-    num_rows_ = first_column.num_rows;
     for (auto& json_col : json_columns) {
       auto column = ArrayInterface(get<Object const>(json_col));
       columns.push_back(column);
@@ -166,7 +175,7 @@ class CupyAdapterBatch : public detail::NoMetaInfo {
   __device__ COOTuple GetElement(size_t idx) const {
     size_t column_idx = idx % array_interface_.num_cols;
     size_t row_idx = idx / array_interface_.num_cols;
-    float value = array_interface_.GetElement(idx);
+    float value = array_interface_.GetElement(row_idx, column_idx);
     return {row_idx, column_idx, value};
   }
 
@@ -183,9 +192,12 @@ class CupyAdapter : public detail::SingleBatchDataIter<CupyAdapterBatch> {
     Json json_array_interface =
         Json::Load({cuda_interface_str.c_str(), cuda_interface_str.size()});
     array_interface_ = ArrayInterface(get<Object const>(json_array_interface), false);
+    batch_ = CupyAdapterBatch(array_interface_);
+    if (array_interface_.num_rows == 0) {
+      return;
+    }
     device_idx_ = dh::CudaGetPointerDevice(array_interface_.data);
     CHECK_NE(device_idx_, -1);
-    batch_ = CupyAdapterBatch(array_interface_);
   }
   const CupyAdapterBatch& Value() const override { return batch_; }
 
@@ -201,7 +213,7 @@ class CupyAdapter : public detail::SingleBatchDataIter<CupyAdapterBatch> {
 
 // Returns maximum row length
 template <typename AdapterBatchT>
-size_t GetRowCounts(const AdapterBatchT& batch, common::Span<size_t> offset,
+size_t GetRowCounts(const AdapterBatchT batch, common::Span<size_t> offset,
                     int device_idx, float missing) {
   IsValidFunctor is_valid(missing);
   // Count elements per row
@@ -214,7 +226,7 @@ size_t GetRowCounts(const AdapterBatchT& batch, common::Span<size_t> offset,
     }
   });
   dh::XGBCachingDeviceAllocator<char> alloc;
-  size_t row_stride = thrust::reduce(
+  size_t row_stride = dh::Reduce(
       thrust::cuda::par(alloc), thrust::device_pointer_cast(offset.data()),
       thrust::device_pointer_cast(offset.data()) + offset.size(), size_t(0),
       thrust::maximum<size_t>());

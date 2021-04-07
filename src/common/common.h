@@ -8,13 +8,17 @@
 
 #include <xgboost/base.h>
 #include <xgboost/logging.h>
+#include <xgboost/span.h>
 
+#include <algorithm>
 #include <exception>
+#include <functional>
 #include <limits>
 #include <type_traits>
 #include <vector>
 #include <string>
 #include <sstream>
+#include <numeric>
 
 #if defined(__CUDACC__)
 #include <thrust/system/cuda/error.h>
@@ -154,6 +158,22 @@ inline void AssertGPUSupport() {
 #endif  // XGBOOST_USE_CUDA
 }
 
+inline void AssertOneAPISupport() {
+#ifndef XGBOOST_USE_ONEAPI
+    LOG(FATAL) << "XGBoost version not compiled with OneAPI support.";
+#endif  // XGBOOST_USE_ONEAPI
+}
+
+template <typename Idx, typename Container,
+          typename V = typename Container::value_type,
+          typename Comp = std::less<V>>
+std::vector<Idx> ArgSort(Container const &array, Comp comp = std::less<V>{}) {
+  std::vector<Idx> result(array.size());
+  std::iota(result.begin(), result.end(), 0);
+  auto op = [&array, comp](Idx const &l, Idx const &r) { return comp(array[l], array[r]); };
+  XGBOOST_PARALLEL_STABLE_SORT(result.begin(), result.end(), op);
+  return result;
+}
 }  // namespace common
 }  // namespace xgboost
 #endif  // XGBOOST_COMMON_COMMON_H_

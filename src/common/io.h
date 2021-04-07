@@ -32,7 +32,7 @@ class PeekableInStream : public dmlc::Stream {
   size_t Read(void* dptr, size_t size) override;
   virtual size_t PeekRead(void* dptr, size_t size);
 
-  void Write(const void* dptr, size_t size) override {
+  void Write(const void*, size_t) override {
     LOG(FATAL) << "Not implemented";
   }
 
@@ -60,7 +60,7 @@ class FixedSizeStream : public PeekableInStream {
   size_t Tell() const { return pointer_; }
   void Seek(size_t pos);
 
-  void Write(const void* dptr, size_t size) override {
+  void Write(const void*, size_t) override {
     LOG(FATAL) << "Not implemented";
   }
 
@@ -75,7 +75,16 @@ class FixedSizeStream : public PeekableInStream {
   std::string buffer_;
 };
 
-std::string LoadSequentialFile(std::string fname);
+/*!
+ * \brief Helper function for loading consecutive file to avoid dmlc Stream when possible.
+ *
+ * \param uri    URI or file name to file.
+ * \param stream Use dmlc Stream unconditionally if set to true.  Used for running test
+ *               without remote filesystem.
+ *
+ * \return File content.
+ */
+std::string LoadSequentialFile(std::string uri, bool stream = false);
 
 inline std::string FileExtension(std::string const& fname) {
   auto splited = Split(fname, '.');

@@ -29,75 +29,7 @@
 namespace xgboost {
 namespace common {
 
-template<typename BinIdxType>
-void GHistIndexMatrix::SetIndexDataForDense(common::Span<BinIdxType> index_data_span,
-                                    size_t batch_threads, const SparsePage& batch,
-                                    size_t rbegin, common::Span<const uint32_t> offsets_span,
-                                    size_t nbins) {
-  const xgboost::Entry* data_ptr = batch.data.HostVector().data();
-  const std::vector<bst_row_t>& offset_vec = batch.offset.HostVector();
-  const size_t batch_size = batch.Size();
-  CHECK_LT(batch_size, offset_vec.size());
-  BinIdxType* index_data = index_data_span.data();
-  const uint32_t* offsets = offsets_span.data();
-  #pragma omp parallel for num_threads(batch_threads) schedule(static)
-    for (omp_ulong i = 0; i < batch_size; ++i) {
-      const int tid = omp_get_thread_num();
-      size_t ibegin = row_ptr[rbegin + i];
-      size_t iend = row_ptr[rbegin + i + 1];
-      const size_t size = offset_vec[i + 1] - offset_vec[i];
-      SparsePage::Inst inst = {data_ptr + offset_vec[i], size};
-      CHECK_EQ(ibegin + inst.size(), iend);
-      for (bst_uint j = 0; j < inst.size(); ++j) {
-        uint32_t idx = cut.SearchBin(inst[j]);
-        index_data[ibegin + j] = static_cast<BinIdxType>(idx - offsets[j]);
-        ++hit_count_tloc_[tid * nbins + idx];
-      }
-    }
-}
-template void GHistIndexMatrix::SetIndexDataForDense(common::Span<uint8_t> index_data_span,
-                                             size_t batch_threads, const SparsePage& batch,
-                                             size_t rbegin,
-                                             common::Span<const uint32_t> offsets_span,
-                                             size_t nbins);
-template void GHistIndexMatrix::SetIndexDataForDense(common::Span<uint16_t> index_data_span,
-                                             size_t batch_threads, const SparsePage& batch,
-                                             size_t rbegin,
-                                             common::Span<const uint32_t> offsets_span,
-                                             size_t nbins);
-template void GHistIndexMatrix::SetIndexDataForDense(common::Span<uint32_t> index_data_span,
-                                             size_t batch_threads, const SparsePage& batch,
-                                             size_t rbegin,
-                                             common::Span<const uint32_t> offsets_span,
-                                             size_t nbins);
-
-void GHistIndexMatrix::SetIndexDataForSparse(common::Span<uint32_t> index_data_span,
-                                                 size_t batch_threads,
-                                                 const SparsePage& batch, size_t rbegin,
-                                                 size_t nbins) {
-  const xgboost::Entry* data_ptr = batch.data.HostVector().data();
-  const std::vector<bst_row_t>& offset_vec = batch.offset.HostVector();
-  const size_t batch_size = batch.Size();
-  CHECK_LT(batch_size, offset_vec.size());
-  uint32_t* index_data = index_data_span.data();
-  #pragma omp parallel for num_threads(batch_threads) schedule(static)
-    for (omp_ulong i = 0; i < batch_size; ++i) {
-      const int tid = omp_get_thread_num();
-      size_t ibegin = row_ptr[rbegin + i];
-      size_t iend = row_ptr[rbegin + i + 1];
-      const size_t size = offset_vec[i + 1] - offset_vec[i];
-      SparsePage::Inst inst = {data_ptr + offset_vec[i], size};
-      CHECK_EQ(ibegin + inst.size(), iend);
-      for (bst_uint j = 0; j < inst.size(); ++j) {
-        uint32_t idx = cut.SearchBin(inst[j]);
-        index_data[ibegin + j] = idx;
-        ++hit_count_tloc_[tid * nbins + idx];
-      }
-    }
-}
-
-void GHistIndexMatrix::ResizeIndex(const size_t rbegin, const SparsePage& batch,
-                                   const size_t n_offsets, const size_t n_index,
+void GHistIndexMatrix::ResizeIndex(const size_t n_index,
                                    const bool isDense) {
   if ((max_num_bins - 1 <= static_cast<int>(std::numeric_limits<uint8_t>::max())) && isDense) {
     index.SetBinTypeSize(kUint8BinsTypeSize);
@@ -113,348 +45,12 @@ void GHistIndexMatrix::ResizeIndex(const size_t rbegin, const SparsePage& batch,
 }
 
 HistogramCuts::HistogramCuts() {
-  monitor_.Init(__FUNCTION__);
   cut_ptrs_.HostVector().emplace_back(0);
 }
 
-// Dispatch to specific builder.
-void HistogramCuts::Build(DMatrix* dmat, uint32_t const max_num_bins) {
-  auto const& info = dmat->Info();
-  size_t const total = info.num_row_ * info.num_col_;
-  size_t const nnz = info.num_nonzero_;
-  float const sparsity = static_cast<float>(nnz) / static_cast<float>(total);
-  // Use a small number to avoid calling `dmat->GetColumnBatches'.
-  float constexpr kSparsityThreshold = 0.0005;
-  // FIXME(trivialfis): Distributed environment is not supported.
-  if (sparsity < kSparsityThreshold && (!rabit::IsDistributed())) {
-    LOG(INFO) << "Building quantile cut on a sparse dataset.";
-    SparseCuts cuts(this);
-    cuts.Build(dmat, max_num_bins);
-  } else {
-    LOG(INFO) << "Building quantile cut on a dense dataset or distributed environment.";
-    DenseCuts cuts(this);
-    cuts.Build(dmat, max_num_bins);
-  }
-  LOG(INFO) << "Total number of hist bins: " << cut_ptrs_.HostVector().back();
-}
-
-bool CutsBuilder::UseGroup(DMatrix* dmat) {
-  auto& info = dmat->Info();
-  return CutsBuilder::UseGroup(info);
-}
-
-bool CutsBuilder::UseGroup(MetaInfo const& info) {
-  size_t const num_groups = info.group_ptr_.size() == 0 ?
-                            0 : info.group_ptr_.size() - 1;
-  // Use group index for weights?
-  bool const use_group_ind = num_groups != 0 &&
-                             (info.weights_.Size() != info.num_row_);
-  return use_group_ind;
-}
-
-void SparseCuts::SingleThreadBuild(SparsePage const& page, MetaInfo const& info,
-                                   uint32_t max_num_bins,
-                                   bool const use_group_ind,
-                                   uint32_t beg_col, uint32_t end_col,
-                                   uint32_t thread_id) {
-  CHECK_GE(end_col, beg_col);
-  constexpr float kFactor = 8;
-
-  // Data groups, used in ranking.
-  std::vector<bst_uint> const& group_ptr = info.group_ptr_;
-  auto &local_min_vals = p_cuts_->min_vals_.HostVector();
-  auto &local_cuts = p_cuts_->cut_values_.HostVector();
-  auto &local_ptrs = p_cuts_->cut_ptrs_.HostVector();
-  local_min_vals.resize(end_col - beg_col, 0);
-
-  for (uint32_t col_id = beg_col; col_id < page.Size() && col_id < end_col; ++col_id) {
-    // Using a local variable makes things easier, but at the cost of memory trashing.
-    WQSketch sketch;
-    common::Span<xgboost::Entry const> const column = page[col_id];
-    uint32_t const n_bins = std::min(static_cast<uint32_t>(column.size()),
-                                     max_num_bins);
-    if (n_bins == 0) {
-      // cut_ptrs_ is initialized with a zero, so there's always an element at the back
-      local_ptrs.emplace_back(local_ptrs.back());
-      continue;
-    }
-
-    sketch.Init(info.num_row_, 1.0 / (n_bins * kFactor));
-    for (auto const& entry : column) {
-      uint32_t weight_ind = 0;
-      if (use_group_ind) {
-        auto row_idx = entry.index;
-        uint32_t group_ind =
-            this->SearchGroupIndFromRow(group_ptr, page.base_rowid + row_idx);
-        weight_ind = group_ind;
-      } else {
-        weight_ind = entry.index;
-      }
-      sketch.Push(entry.fvalue, info.GetWeight(weight_ind));
-    }
-
-    WQSketch::SummaryContainer out_summary;
-    sketch.GetSummary(&out_summary);
-    WQSketch::SummaryContainer summary;
-    summary.Reserve(n_bins + 1);
-    summary.SetPrune(out_summary, n_bins + 1);
-
-    // Can be use data[1] as the min values so that we don't need to
-    // store another array?
-    float mval = summary.data[0].value;
-    local_min_vals[col_id - beg_col]  = mval - (fabs(mval) + 1e-5);
-
-    this->AddCutPoint(summary, max_num_bins);
-
-    bst_float cpt = (summary.size > 0) ?
-                    summary.data[summary.size - 1].value :
-                    local_min_vals[col_id - beg_col];
-    cpt += fabs(cpt) + 1e-5;
-    local_cuts.emplace_back(cpt);
-
-    local_ptrs.emplace_back(local_cuts.size());
-  }
-}
-
-std::vector<size_t> SparseCuts::LoadBalance(SparsePage const& page,
-                                            size_t const nthreads) {
-  /* Some sparse datasets have their mass concentrating on small
-   * number of features.  To avoid wating for a few threads running
-   * forever, we here distirbute different number of columns to
-   * different threads according to number of entries. */
-  size_t const total_entries = page.data.Size();
-  size_t const entries_per_thread = common::DivRoundUp(total_entries, nthreads);
-
-  std::vector<size_t> cols_ptr(nthreads+1, 0);
-  size_t count {0};
-  size_t current_thread {1};
-
-  for (size_t col_id = 0; col_id < page.Size(); ++col_id) {
-    auto const column = page[col_id];
-    cols_ptr[current_thread]++;  // add one column to thread
-    count += column.size();
-    if (count > entries_per_thread + 1) {
-      current_thread++;
-      count = 0;
-      cols_ptr[current_thread] = cols_ptr[current_thread-1];
-    }
-  }
-  // Idle threads.
-  for (; current_thread < cols_ptr.size() - 1; ++current_thread) {
-    cols_ptr[current_thread+1] = cols_ptr[current_thread];
-  }
-
-  return cols_ptr;
-}
-
-void SparseCuts::Build(DMatrix* dmat, uint32_t const max_num_bins) {
-  monitor_.Start(__FUNCTION__);
-  // Use group index for weights?
-  auto use_group = UseGroup(dmat);
-  uint32_t nthreads = omp_get_max_threads();
-  CHECK_GT(nthreads, 0);
-  std::vector<HistogramCuts> cuts_containers(nthreads);
-  std::vector<std::unique_ptr<SparseCuts>> sparse_cuts(nthreads);
-  for (size_t i = 0; i < nthreads; ++i) {
-    sparse_cuts[i].reset(new SparseCuts(&cuts_containers[i]));
-  }
-
-  for (auto const& page : dmat->GetBatches<CSCPage>()) {
-    CHECK_LE(page.Size(), dmat->Info().num_col_);
-    monitor_.Start("Load balance");
-    std::vector<size_t> col_ptr = LoadBalance(page, nthreads);
-    monitor_.Stop("Load balance");
-    // We here decouples the logic between build and parallelization
-    // to simplify things a bit.
-#pragma omp parallel for num_threads(nthreads) schedule(static)
-    for (omp_ulong i = 0; i < nthreads; ++i) {
-      common::Monitor t_monitor;
-      t_monitor.Init("SingleThreadBuild: " + std::to_string(i));
-      t_monitor.Start(std::to_string(i));
-      sparse_cuts[i]->SingleThreadBuild(page, dmat->Info(), max_num_bins, use_group,
-                                        col_ptr[i], col_ptr[i+1], i);
-      t_monitor.Stop(std::to_string(i));
-    }
-
-    this->Concat(sparse_cuts, dmat->Info().num_col_);
-  }
-
-  monitor_.Stop(__FUNCTION__);
-}
-
-void SparseCuts::Concat(
-    std::vector<std::unique_ptr<SparseCuts>> const& cuts, uint32_t n_cols) {
-  monitor_.Start(__FUNCTION__);
-  uint32_t nthreads = omp_get_max_threads();
-  auto &local_min_vals = p_cuts_->min_vals_.HostVector();
-  auto &local_cuts = p_cuts_->cut_values_.HostVector();
-  auto &local_ptrs = p_cuts_->cut_ptrs_.HostVector();
-  local_min_vals.resize(n_cols, std::numeric_limits<float>::max());
-  size_t min_vals_tail = 0;
-
-  for (uint32_t t = 0; t < nthreads; ++t) {
-    auto& thread_min_vals = cuts[t]->p_cuts_->min_vals_.HostVector();
-    auto& thread_cuts = cuts[t]->p_cuts_->cut_values_.HostVector();
-    auto& thread_ptrs = cuts[t]->p_cuts_->cut_ptrs_.HostVector();
-
-    // concat csc pointers.
-    size_t const old_ptr_size = local_ptrs.size();
-    local_ptrs.resize(
-        thread_ptrs.size() + local_ptrs.size() - 1);
-    size_t const new_icp_size = local_ptrs.size();
-    auto tail = local_ptrs[old_ptr_size-1];
-    for (size_t j = old_ptr_size; j < new_icp_size; ++j) {
-      local_ptrs[j] = tail + thread_ptrs[j-old_ptr_size+1];
-    }
-    // concat csc values
-    size_t const old_iv_size = local_cuts.size();
-    local_cuts.resize(
-        thread_cuts.size() + local_cuts.size());
-    size_t const new_iv_size = local_cuts.size();
-    for (size_t j = old_iv_size; j < new_iv_size; ++j) {
-      local_cuts[j] = thread_cuts[j-old_iv_size];
-    }
-    // merge min values
-    for (size_t j = 0; j < thread_min_vals.size(); ++j) {
-       local_min_vals.at(min_vals_tail + j) =
-          std::min(local_min_vals.at(min_vals_tail + j), thread_min_vals.at(j));
-    }
-    min_vals_tail += thread_min_vals.size();
-  }
-  monitor_.Stop(__FUNCTION__);
-}
-
-void DenseCuts::Build(DMatrix* p_fmat, uint32_t max_num_bins) {
-  monitor_.Start(__FUNCTION__);
-  const MetaInfo& info = p_fmat->Info();
-
-  // safe factor for better accuracy
-  constexpr int kFactor = 8;
-  std::vector<WQSketch> sketchs;
-
-  const int nthread = omp_get_max_threads();
-
-  unsigned const nstep =
-      static_cast<unsigned>((info.num_col_ + nthread - 1) / nthread);
-  unsigned const ncol = static_cast<unsigned>(info.num_col_);
-  sketchs.resize(info.num_col_);
-  for (auto& s : sketchs) {
-    s.Init(info.num_row_, 1.0 / (max_num_bins * kFactor));
-  }
-
-  // Data groups, used in ranking.
-  std::vector<bst_uint> const& group_ptr = info.group_ptr_;
-  size_t const num_groups = group_ptr.size() == 0 ? 0 : group_ptr.size() - 1;
-  // Use group index for weights?
-  bool const use_group = UseGroup(p_fmat);
-  const bool isDense = p_fmat->IsDense();
-  for (const auto &batch : p_fmat->GetBatches<SparsePage>()) {
-    size_t group_ind = 0;
-    if (use_group) {
-      group_ind = this->SearchGroupIndFromRow(group_ptr, batch.base_rowid);
-    }
-#pragma omp parallel num_threads(nthread) firstprivate(group_ind, use_group)
-    {
-      CHECK_EQ(nthread, omp_get_num_threads());
-      auto tid = static_cast<unsigned>(omp_get_thread_num());
-      unsigned begin = std::min(nstep * tid, ncol);
-      unsigned end = std::min(nstep * (tid + 1), ncol);
-
-      // do not iterate if no columns are assigned to the thread
-      if (begin < end && end <= ncol) {
-        for (size_t i = 0; i < batch.Size(); ++i) { // NOLINT(*)
-          size_t const ridx = batch.base_rowid + i;
-          SparsePage::Inst const inst = batch[i];
-          if (use_group &&
-              group_ptr[group_ind] == ridx &&
-              // maximum equals to weights.size() - 1
-              group_ind < num_groups - 1) {
-            // move to next group
-            group_ind++;
-          }
-          size_t w_idx = use_group ? group_ind : ridx;
-          auto w = info.GetWeight(w_idx);
-          if (isDense) {
-            auto data = inst.data();
-            for (size_t ii = begin; ii < end; ii++) {
-              sketchs[ii].Push(data[ii].fvalue, w);
-            }
-          } else {
-            for (auto const& entry : inst) {
-              if (entry.index >= begin && entry.index < end) {
-                sketchs[entry.index].Push(entry.fvalue, w);
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-
-  Init(&sketchs, max_num_bins, info.num_row_);
-  monitor_.Stop(__FUNCTION__);
-}
-
-/**
- * \param [in,out]  in_sketchs
- * \param           max_num_bins  The maximum number bins.
- * \param           max_rows      Number of rows in this DMatrix.
- */
-void DenseCuts::Init
-(std::vector<WQSketch>* in_sketchs, uint32_t max_num_bins, size_t max_rows) {
-  monitor_.Start(__func__);
-  std::vector<WQSketch>& sketchs = *in_sketchs;
-
-  // Compute how many cuts samples we need at each node
-  // Do not require more than the number of total rows  in training data
-  // This allows efficient training on wide data
-  size_t global_max_rows = max_rows;
-  rabit::Allreduce<rabit::op::Sum>(&global_max_rows, 1);
-  constexpr int kFactor = 8;
-  size_t intermediate_num_cuts =
-      std::min(global_max_rows, static_cast<size_t>(max_num_bins * kFactor));
-  // gather the histogram data
-  rabit::SerializeReducer<WQSketch::SummaryContainer> sreducer;
-  std::vector<WQSketch::SummaryContainer> summary_array;
-  summary_array.resize(sketchs.size());
-  for (size_t i = 0; i < sketchs.size(); ++i) {
-    WQSketch::SummaryContainer out;
-    sketchs[i].GetSummary(&out);
-    summary_array[i].Reserve(intermediate_num_cuts);
-    summary_array[i].SetPrune(out, intermediate_num_cuts);
-  }
-  CHECK_EQ(summary_array.size(), in_sketchs->size());
-  size_t nbytes = WQSketch::SummaryContainer::CalcMemCost(intermediate_num_cuts);
-  // TODO(chenqin): rabit failure recovery assumes no boostrap onetime call after loadcheckpoint
-  // we need to move this allreduce before loadcheckpoint call in future
-  sreducer.Allreduce(dmlc::BeginPtr(summary_array), nbytes, summary_array.size());
-  p_cuts_->min_vals_.HostVector().resize(sketchs.size());
-
-  for (size_t fid = 0; fid < summary_array.size(); ++fid) {
-    WQSketch::SummaryContainer a;
-    a.Reserve(max_num_bins + 1);
-    a.SetPrune(summary_array[fid], max_num_bins + 1);
-    const bst_float mval = a.data[0].value;
-    p_cuts_->min_vals_.HostVector()[fid] = mval - (fabs(mval) + 1e-5);
-    AddCutPoint(a, max_num_bins);
-    // push a value that is greater than anything
-    const bst_float cpt
-      = (a.size > 0) ? a.data[a.size - 1].value : p_cuts_->min_vals_.HostVector()[fid];
-    // this must be bigger than last value in a scale
-    const bst_float last = cpt + (fabs(cpt) + 1e-5);
-    p_cuts_->cut_values_.HostVector().push_back(last);
-
-    // Ensure that every feature gets at least one quantile point
-    CHECK_LE(p_cuts_->cut_values_.HostVector().size(), std::numeric_limits<uint32_t>::max());
-    auto cut_size = static_cast<uint32_t>(p_cuts_->cut_values_.HostVector().size());
-    CHECK_GT(cut_size, p_cuts_->cut_ptrs_.HostVector().back());
-    p_cuts_->cut_ptrs_.HostVector().push_back(cut_size);
-  }
-  monitor_.Stop(__func__);
-}
-
 void GHistIndexMatrix::Init(DMatrix* p_fmat, int max_bins) {
-  cut.Build(p_fmat, max_bins);
+  cut = SketchOnDMatrix(p_fmat, max_bins);
+
   max_num_bins = max_bins;
   const int32_t nthread = omp_get_max_threads();
   const uint32_t nbins = cut.Ptrs().back();
@@ -482,47 +78,56 @@ void GHistIndexMatrix::Init(DMatrix* p_fmat, int max_bins) {
     const size_t batch_threads = std::max(
         size_t(1),
         std::min(batch.Size(), static_cast<size_t>(omp_get_max_threads())));
+    auto page = batch.GetView();
     MemStackAllocator<size_t, 128> partial_sums(batch_threads);
     size_t* p_part = partial_sums.Get();
 
     size_t block_size =  batch.Size() / batch_threads;
 
+    dmlc::OMPException exc;
     #pragma omp parallel num_threads(batch_threads)
     {
       #pragma omp for
       for (omp_ulong tid = 0; tid < batch_threads; ++tid) {
-        size_t ibegin = block_size * tid;
-        size_t iend = (tid == (batch_threads-1) ? batch.Size() : (block_size * (tid+1)));
+        exc.Run([&]() {
+          size_t ibegin = block_size * tid;
+          size_t iend = (tid == (batch_threads-1) ? batch.Size() : (block_size * (tid+1)));
 
-        size_t sum = 0;
-        for (size_t i = ibegin; i < iend; ++i) {
-          sum += batch[i].size();
-          row_ptr[rbegin + 1 + i] = sum;
-        }
+          size_t sum = 0;
+          for (size_t i = ibegin; i < iend; ++i) {
+            sum += page[i].size();
+            row_ptr[rbegin + 1 + i] = sum;
+          }
+        });
       }
 
       #pragma omp single
       {
-        p_part[0] = prev_sum;
-        for (size_t i = 1; i < batch_threads; ++i) {
-          p_part[i] = p_part[i - 1] + row_ptr[rbegin + i*block_size];
-        }
+        exc.Run([&]() {
+          p_part[0] = prev_sum;
+          for (size_t i = 1; i < batch_threads; ++i) {
+            p_part[i] = p_part[i - 1] + row_ptr[rbegin + i*block_size];
+          }
+        });
       }
 
       #pragma omp for
       for (omp_ulong tid = 0; tid < batch_threads; ++tid) {
-        size_t ibegin = block_size * tid;
-        size_t iend = (tid == (batch_threads-1) ? batch.Size() : (block_size * (tid+1)));
+        exc.Run([&]() {
+          size_t ibegin = block_size * tid;
+          size_t iend = (tid == (batch_threads-1) ? batch.Size() : (block_size * (tid+1)));
 
-        for (size_t i = ibegin; i < iend; ++i) {
-          row_ptr[rbegin + 1 + i] += p_part[tid];
-        }
+          for (size_t i = ibegin; i < iend; ++i) {
+            row_ptr[rbegin + 1 + i] += p_part[tid];
+          }
+        });
       }
     }
+    exc.Rethrow();
 
     const size_t n_offsets = cut.Ptrs().size() - 1;
     const size_t n_index = row_ptr[rbegin + batch.Size()];
-    ResizeIndex(rbegin, batch, n_offsets, n_index, isDense);
+    ResizeIndex(n_index, isDense);
 
     CHECK_GT(cut.Values().size(), 0U);
 
@@ -537,33 +142,45 @@ void GHistIndexMatrix::Init(DMatrix* p_fmat, int max_bins) {
 
     if (isDense) {
       BinTypeSize curent_bin_size = index.GetBinTypeSize();
-      common::Span<const uint32_t> offsets_span = {offsets, n_offsets};
       if (curent_bin_size == kUint8BinsTypeSize) {
-          common::Span<uint8_t> index_data_span = {index.data<uint8_t>(), n_index};
-          SetIndexDataForDense(index_data_span, batch_threads, batch, rbegin, offsets_span, nbins);
+        common::Span<uint8_t> index_data_span = {index.data<uint8_t>(),
+                                                 n_index};
+        SetIndexData(index_data_span, batch_threads, batch, rbegin, nbins,
+                     [offsets](auto idx, auto j) {
+                       return static_cast<uint8_t>(idx - offsets[j]);
+                     });
+
       } else if (curent_bin_size == kUint16BinsTypeSize) {
-          common::Span<uint16_t> index_data_span = {index.data<uint16_t>(), n_index};
-          SetIndexDataForDense(index_data_span, batch_threads, batch, rbegin, offsets_span, nbins);
+        common::Span<uint16_t> index_data_span = {index.data<uint16_t>(),
+                                                  n_index};
+        SetIndexData(index_data_span, batch_threads, batch, rbegin, nbins,
+                     [offsets](auto idx, auto j) {
+                       return static_cast<uint16_t>(idx - offsets[j]);
+                     });
       } else {
-          CHECK_EQ(curent_bin_size, kUint32BinsTypeSize);
-          common::Span<uint32_t> index_data_span = {index.data<uint32_t>(), n_index};
-          SetIndexDataForDense(index_data_span, batch_threads, batch, rbegin, offsets_span, nbins);
+        CHECK_EQ(curent_bin_size, kUint32BinsTypeSize);
+        common::Span<uint32_t> index_data_span = {index.data<uint32_t>(),
+                                                  n_index};
+        SetIndexData(index_data_span, batch_threads, batch, rbegin, nbins,
+                     [offsets](auto idx, auto j) {
+                       return static_cast<uint32_t>(idx - offsets[j]);
+                     });
       }
 
     /* For sparse DMatrix we have to store index of feature for each bin
        in index field to chose right offset. So offset is nullptr and index is not reduced */
     } else {
       common::Span<uint32_t> index_data_span = {index.data<uint32_t>(), n_index};
-      SetIndexDataForSparse(index_data_span, batch_threads, batch, rbegin, nbins);
+      SetIndexData(index_data_span, batch_threads, batch, rbegin, nbins,
+                   [](auto idx, auto) { return idx; });
     }
 
-    #pragma omp parallel for num_threads(nthread) schedule(static)
-    for (bst_omp_uint idx = 0; idx < bst_omp_uint(nbins); ++idx) {
+    ParallelFor(bst_omp_uint(nbins), nthread, [&](bst_omp_uint idx) {
       for (int32_t tid = 0; tid < nthread; ++tid) {
         hit_count[idx] += hit_count_tloc_[tid * nbins + idx];
         hit_count_tloc_[tid * nbins + idx] = 0;  // reset for next batch
       }
-    }
+    });
 
     prev_sum = row_ptr[rbegin + batch.Size()];
     rbegin += batch.Size();
@@ -1050,12 +667,11 @@ void BuildHistKernel(const std::vector<GradientPair>& gpair,
   }
 }
 
-template<typename GradientSumT>
-void GHistBuilder<GradientSumT>::BuildHist(const std::vector<GradientPair>& gpair,
-                             const RowSetCollection::Elem row_indices,
-                             const GHistIndexMatrix& gmat,
-                             GHistRowT hist,
-                             bool isDense) {
+template <typename GradientSumT>
+void GHistBuilder<GradientSumT>::BuildHist(
+    const std::vector<GradientPair> &gpair,
+    const RowSetCollection::Elem row_indices, const GHistIndexMatrix &gmat,
+    GHistRowT hist, bool isDense) {
   const size_t nrows = row_indices.Size();
   const size_t no_prefetch_size = Prefetch::NoPrefetchSize(nrows);
 
@@ -1092,7 +708,7 @@ void GHistBuilder<GradientSumT>::BuildBlockHist(const std::vector<GradientPair>&
                                   const RowSetCollection::Elem row_indices,
                                   const GHistIndexBlockMatrix& gmatb,
                                   GHistRowT hist) {
-  constexpr int kUnroll = 8;  // loop unrolling factor
+  static constexpr int kUnroll = 8;  // loop unrolling factor
   const size_t nblock = gmatb.GetNumBlock();
   const size_t nrows = row_indices.end - row_indices.begin;
   const size_t rest = nrows % kUnroll;
@@ -1101,40 +717,44 @@ void GHistBuilder<GradientSumT>::BuildBlockHist(const std::vector<GradientPair>&
 #endif  // defined(_OPENMP)
   xgboost::detail::GradientPairInternal<GradientSumT>* p_hist = hist.data();
 
+  dmlc::OMPException exc;
 #pragma omp parallel for num_threads(nthread) schedule(guided)
   for (bst_omp_uint bid = 0; bid < nblock; ++bid) {
-    auto gmat = gmatb[bid];
+    exc.Run([&]() {
+      auto gmat = gmatb[bid];
 
-    for (size_t i = 0; i < nrows - rest; i += kUnroll) {
-      size_t rid[kUnroll];
-      size_t ibegin[kUnroll];
-      size_t iend[kUnroll];
-      GradientPair stat[kUnroll];
+      for (size_t i = 0; i < nrows - rest; i += kUnroll) {
+        size_t rid[kUnroll];
+        size_t ibegin[kUnroll];
+        size_t iend[kUnroll];
+        GradientPair stat[kUnroll];
 
-      for (int k = 0; k < kUnroll; ++k) {
-        rid[k] = row_indices.begin[i + k];
-        ibegin[k] = gmat.row_ptr[rid[k]];
-        iend[k] = gmat.row_ptr[rid[k] + 1];
-        stat[k] = gpair[rid[k]];
-      }
-      for (int k = 0; k < kUnroll; ++k) {
-        for (size_t j = ibegin[k]; j < iend[k]; ++j) {
-          const uint32_t bin = gmat.index[j];
-          p_hist[bin].Add(stat[k].GetGrad(), stat[k].GetHess());
+        for (int k = 0; k < kUnroll; ++k) {
+          rid[k] = row_indices.begin[i + k];
+          ibegin[k] = gmat.row_ptr[rid[k]];
+          iend[k] = gmat.row_ptr[rid[k] + 1];
+          stat[k] = gpair[rid[k]];
+        }
+        for (int k = 0; k < kUnroll; ++k) {
+          for (size_t j = ibegin[k]; j < iend[k]; ++j) {
+            const uint32_t bin = gmat.index[j];
+            p_hist[bin].Add(stat[k].GetGrad(), stat[k].GetHess());
+          }
         }
       }
-    }
-    for (size_t i = nrows - rest; i < nrows; ++i) {
-      const size_t rid = row_indices.begin[i];
-      const size_t ibegin = gmat.row_ptr[rid];
-      const size_t iend = gmat.row_ptr[rid + 1];
-      const GradientPair stat = gpair[rid];
-      for (size_t j = ibegin; j < iend; ++j) {
-        const uint32_t bin = gmat.index[j];
-        p_hist[bin].Add(stat.GetGrad(), stat.GetHess());
+      for (size_t i = nrows - rest; i < nrows; ++i) {
+        const size_t rid = row_indices.begin[i];
+        const size_t ibegin = gmat.row_ptr[rid];
+        const size_t iend = gmat.row_ptr[rid + 1];
+        const GradientPair stat = gpair[rid];
+        for (size_t j = ibegin; j < iend; ++j) {
+          const uint32_t bin = gmat.index[j];
+          p_hist[bin].Add(stat.GetGrad(), stat.GetHess());
+        }
       }
-    }
+    });
   }
+  exc.Rethrow();
 }
 template
 void GHistBuilder<float>::BuildBlockHist(const std::vector<GradientPair>& gpair,
@@ -1159,12 +779,11 @@ void GHistBuilder<GradientSumT>::SubtractionTrick(GHistRowT self,
   const size_t block_size = 1024;  // aproximatly 1024 values per block
   size_t n_blocks = size/block_size + !!(size%block_size);
 
-#pragma omp parallel for
-  for (omp_ulong iblock = 0; iblock < n_blocks; ++iblock) {
+  ParallelFor(omp_ulong(n_blocks), [&](omp_ulong iblock) {
     const size_t ibegin = iblock*block_size;
     const size_t iend = (((iblock+1)*block_size > size) ? size : ibegin + block_size);
     SubtractionHist(self, parent, sibling, ibegin, iend);
-  }
+  });
 }
 template
 void GHistBuilder<float>::SubtractionTrick(GHistRow<float> self,

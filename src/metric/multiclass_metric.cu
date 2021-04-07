@@ -53,18 +53,23 @@ class MultiClassMetricsReduction {
     int label_error = 0;
     bool const is_null_weight = weights.Size() == 0;
 
+    dmlc::OMPException exc;
 #pragma omp parallel for reduction(+: residue_sum, weights_sum) schedule(static)
     for (omp_ulong idx = 0; idx < ndata; ++idx) {
-      bst_float weight = is_null_weight ? 1.0f : h_weights[idx];
-      auto label = static_cast<int>(h_labels[idx]);
-      if (label >= 0 && label < static_cast<int>(n_class)) {
-        residue_sum += EvalRowPolicy::EvalRow(
-            label, h_preds.data() + idx * n_class, n_class) * weight;
-        weights_sum += weight;
-      } else {
-        label_error = label;
-      }
+      exc.Run([&]() {
+        bst_float weight = is_null_weight ? 1.0f : h_weights[idx];
+        auto label = static_cast<int>(h_labels[idx]);
+        if (label >= 0 && label < static_cast<int>(n_class)) {
+          residue_sum += EvalRowPolicy::EvalRow(
+              label, h_preds.data() + idx * n_class, n_class) * weight;
+          weights_sum += weight;
+        } else {
+          label_error = label;
+        }
+      });
     }
+    exc.Rethrow();
+
     CheckLabelError(label_error, n_class);
     PackedReduceResult res { residue_sum, weights_sum };
 
@@ -158,18 +163,22 @@ struct EvalMClassBase : public Metric {
   bst_float Eval(const HostDeviceVector<bst_float> &preds,
                  const MetaInfo &info,
                  bool distributed) override {
-    CHECK_NE(info.labels_.Size(), 0U) << "label set cannot be empty";
-    CHECK(preds.Size() % info.labels_.Size() == 0)
-        << "label and prediction size not match";
-    const size_t nclass = preds.Size() / info.labels_.Size();
-    CHECK_GE(nclass, 1U)
-        << "mlogloss and merror are only used for multi-class classification,"
-        << " use logloss for binary classification";
-
-    int device = tparam_->gpu_id;
-    auto result = reducer_.Reduce(*tparam_, device, nclass, info.weights_, info.labels_, preds);
-    double dat[2] { result.Residue(), result.Weights() };
-
+    if (info.labels_.Size() == 0) {
+      CHECK_EQ(preds.Size(), 0);
+    } else {
+      CHECK(preds.Size() % info.labels_.Size() == 0) << "label and prediction size not match";
+    }
+    double dat[2] { 0.0, 0.0 };
+    if (info.labels_.Size() != 0) {
+      const size_t nclass = preds.Size() / info.labels_.Size();
+      CHECK_GE(nclass, 1U)
+          << "mlogloss and merror are only used for multi-class classification,"
+          << " use logloss for binary classification";
+      int device = tparam_->gpu_id;
+      auto result = reducer_.Reduce(*tparam_, device, nclass, info.weights_, info.labels_, preds);
+      dat[0] = result.Residue();
+      dat[1] = result.Weights();
+    }
     if (distributed) {
       rabit::Allreduce<rabit::op::Sum>(dat, 2);
     }

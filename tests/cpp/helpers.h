@@ -8,6 +8,7 @@
 #include <fstream>
 #include <cstdio>
 #include <string>
+#include <memory>
 #include <vector>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -21,6 +22,7 @@
 
 #include "../../src/common/common.h"
 #include "../../src/gbm/gbtree_model.h"
+#include "../../src/data/array_interface.h"
 
 #if defined(__CUDACC__)
 #define DeclareUnifiedTest(name) GPU ## name
@@ -39,6 +41,12 @@ class ObjFunction;
 class Metric;
 struct LearnerModelParam;
 class GradientBooster;
+}
+
+template <typename Float>
+Float RelError(Float l, Float r) {
+  static_assert(std::is_floating_point<Float>::value, "");
+  return std::abs(1.0f - l / r);
 }
 
 bool FileExists(const std::string& filename);
@@ -168,9 +176,34 @@ class SimpleRealUniformDistribution {
   ResultT operator()(GeneratorT* rng) const {
     ResultT tmp = GenerateCanonical<std::numeric_limits<ResultT>::digits,
                                     GeneratorT>(rng);
-    return (tmp * (upper_ - lower_)) + lower_;
+    auto ret = (tmp * (upper_ - lower_)) + lower_;
+    // Correct floating point error.
+    return std::max(ret, lower_);
   }
 };
+
+template <typename T>
+Json GetArrayInterface(HostDeviceVector<T> *storage, size_t rows, size_t cols) {
+  Json array_interface{Object()};
+  array_interface["data"] = std::vector<Json>(2);
+  if (storage->DeviceCanRead()) {
+    array_interface["data"][0] =
+        Integer(reinterpret_cast<int64_t>(storage->ConstDevicePointer()));
+  } else {
+    array_interface["data"][0] =
+        Integer(reinterpret_cast<int64_t>(storage->ConstHostPointer()));
+  }
+  array_interface["data"][1] = Boolean(false);
+
+  array_interface["shape"] = std::vector<Json>(2);
+  array_interface["shape"][0] = rows;
+  array_interface["shape"][1] = cols;
+
+  char t = ArrayInterfaceHandler::TypeChar<T>();
+  array_interface["typestr"] = String(std::string{"<"} + t + std::to_string(sizeof(T)));
+  array_interface["version"] = 1;
+  return array_interface;
+}
 
 // Generate in-memory random data without using DMatrix.
 class RandomDataGenerator {
@@ -250,6 +283,22 @@ class RandomDataGenerator {
                                                  size_t classes = 1);
 #endif
 };
+
+inline std::vector<float>
+GenerateRandomCategoricalSingleColumn(int n, size_t num_categories) {
+  std::vector<float> x(n);
+  std::mt19937 rng(0);
+  std::uniform_int_distribution<size_t> dist(0, num_categories - 1);
+  std::generate(x.begin(), x.end(), [&]() { return dist(rng); });
+  // Make sure each category is present
+  for(size_t i = 0; i < num_categories; i++) {
+    x[i] = i;
+  }
+  return x;
+}
+
+std::shared_ptr<DMatrix> GetDMatrixFromData(const std::vector<float> &x,
+                                            int num_rows, int num_columns);
 
 std::unique_ptr<DMatrix> CreateSparsePageDMatrix(
     size_t n_entries, size_t page_size, std::string tmp_file);
@@ -340,6 +389,10 @@ class CudaArrayIterForTest {
   auto Proxy() -> decltype(proxy_) { return proxy_; }
 };
 
+void DMatrixToCSR(DMatrix *dmat, std::vector<float> *p_data,
+                  std::vector<size_t> *p_row_ptr,
+                  std::vector<bst_feature_t> *p_cids);
+
 typedef void *DataIterHandle;  // NOLINT(*)
 
 inline void Reset(DataIterHandle self) {
@@ -349,6 +402,10 @@ inline void Reset(DataIterHandle self) {
 inline int Next(DataIterHandle self) {
   return static_cast<CudaArrayIterForTest*>(self)->Next();
 }
+
+class RMMAllocator;
+using RMMAllocatorPtr = std::unique_ptr<RMMAllocator, void(*)(RMMAllocator*)>;
+RMMAllocatorPtr SetUpRMMResourceForCppTests(int argc, char** argv);
 
 }  // namespace xgboost
 #endif
